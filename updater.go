@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 const repoAPI = "https://api.github.com/repos/Mojashi/claude-conversation-editor/releases/latest"
@@ -114,14 +115,15 @@ func (a *App) DoUpdate(downloadURL string) error {
 		return fmt.Errorf("no .app found in update zip")
 	}
 
-	// 古いバンドルを削除して置き換え
-	os.RemoveAll(appBundle)
-	if err := exec.Command("cp", "-r", newApp[0], appBundle).Run(); err != nil {
-		return fmt.Errorf("replace failed: %w", err)
-	}
-
-	// 再起動
-	exec.Command("open", appBundle).Start()
+	// 自分が終了した後にシェルで置き換え＆再起動
+	script := fmt.Sprintf(
+		"sleep 1 && rm -rf %q && cp -r %q %q && open %q",
+		appBundle, newApp[0], appBundle, appBundle,
+	)
+	cmd := exec.Command("sh", "-c", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Start()
+	cmd.Process.Release()
 	os.Exit(0)
 	return nil
 }
