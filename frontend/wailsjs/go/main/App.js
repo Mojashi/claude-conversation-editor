@@ -30,8 +30,16 @@ export function EditMessage(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['EditMessage'](arg1, arg2, arg3, arg4);
 }
 
-export function ExecClaude(arg1, arg2) {
-  return window['go']['main']['App']['ExecClaude'](arg1, arg2);
+export function ExecClaude(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['ExecClaude'](arg1, arg2, arg3, arg4);
+}
+
+export function GetAvailableTerminals() {
+  return window['go']['main']['App']['GetAvailableTerminals']();
+}
+
+export function GetClaudeCommand(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GetClaudeCommand'](arg1, arg2, arg3);
 }
 
 export function GetConversation(arg1, arg2) {

@@ -354,13 +354,30 @@ func (a *App) SaveConversation(projectID, sessionID string, req SaveRequest) (*S
 	}
 	f.Close()
 
-	var findKeptAncestor func(string) string
-	findKeptAncestor = func(uuid string) string {
+	// Build the set of all UUIDs that will survive in the output
+	survivingUUIDs := make(map[string]bool)
+	for k := range keepSet {
+		survivingUUIDs[k] = true
+	}
+	for _, line := range rawLines {
+		var d map[string]json.RawMessage
+		if json.Unmarshal(line, &d) != nil {
+			continue
+		}
+		var t, uuid string
+		json.Unmarshal(d["type"], &t)
+		json.Unmarshal(d["uuid"], &uuid)
+		if t != "user" && t != "assistant" && uuid != "" {
+			survivingUUIDs[uuid] = true
+		}
+	}
+
+	findSurvivingAncestor := func(uuid string) string {
 		visited := map[string]bool{}
 		cur := uuid
 		for cur != "" && !visited[cur] {
 			visited[cur] = true
-			if keepSet[cur] {
+			if survivingUUIDs[cur] {
 				return cur
 			}
 			cur = uuidToParent[cur]
@@ -381,6 +398,41 @@ func (a *App) SaveConversation(projectID, sessionID string, req SaveRequest) (*S
 		if json.Unmarshal([]byte(last), &d) == nil {
 			json.Unmarshal(d["uuid"], &lastInsertUUID)
 		}
+		// Add inserted UUIDs to surviving set
+		for _, il := range req.InsertLines {
+			var id map[string]json.RawMessage
+			if json.Unmarshal([]byte(il), &id) == nil {
+				var u string
+				json.Unmarshal(id["uuid"], &u)
+				if u != "" {
+					survivingUUIDs[u] = true
+				}
+			}
+		}
+	}
+
+	// Helper to fix parentUuid on a raw JSON map if needed
+	fixParentUuid := func(d map[string]json.RawMessage, line []byte) string {
+		var parent string
+		json.Unmarshal(d["parentUuid"], &parent)
+		if parent == "" || survivingUUIDs[parent] {
+			return string(line)
+		}
+		// If parent was explicitly deleted and we have inserts, point to last insert
+		if deletedSet[parent] && lastInsertUUID != "" {
+			d["parentUuid"], _ = json.Marshal(lastInsertUUID)
+			out, _ := json.Marshal(d)
+			return string(out)
+		}
+		ancestor := findSurvivingAncestor(parent)
+		if ancestor == "" {
+			d["parentUuid"] = json.RawMessage("null")
+		} else {
+			b, _ := json.Marshal(ancestor)
+			d["parentUuid"] = b
+		}
+		out, _ := json.Marshal(d)
+		return string(out)
 	}
 
 	var linesToWrite []string
@@ -394,7 +446,8 @@ func (a *App) SaveConversation(projectID, sessionID string, req SaveRequest) (*S
 		var t string
 		json.Unmarshal(d["type"], &t)
 		if t != "user" && t != "assistant" {
-			linesToWrite = append(linesToWrite, string(line))
+			// Keep metadata records, but fix parentUuid if needed
+			linesToWrite = append(linesToWrite, fixParentUuid(d, line))
 			continue
 		}
 		var uuid string
@@ -407,26 +460,8 @@ func (a *App) SaveConversation(projectID, sessionID string, req SaveRequest) (*S
 			}
 			continue
 		}
-		var parent string
-		json.Unmarshal(d["parentUuid"], &parent)
-		// Fix parentUuid: if parent was deleted and we inserted, point to last insert
-		if parent != "" && deletedSet[parent] && lastInsertUUID != "" {
-			d["parentUuid"], _ = json.Marshal(lastInsertUUID)
-			out, _ := json.Marshal(d)
-			linesToWrite = append(linesToWrite, string(out))
-		} else if parent != "" && !keepSet[parent] && !deletedSet[parent] {
-			ancestor := findKeptAncestor(parent)
-			if ancestor == "" {
-				d["parentUuid"] = json.RawMessage("null")
-			} else {
-				b, _ := json.Marshal(ancestor)
-				d["parentUuid"] = b
-			}
-			out, _ := json.Marshal(d)
-			linesToWrite = append(linesToWrite, string(out))
-		} else {
-			linesToWrite = append(linesToWrite, string(line))
-		}
+		// Fix parentUuid if parent was deleted
+		linesToWrite = append(linesToWrite, fixParentUuid(d, line))
 	}
 
 	backup := path + ".bak"
@@ -621,17 +656,107 @@ func projectIDToPath(id string) string {
 	return "/" + strings.ReplaceAll(strings.TrimPrefix(id, "-"), "-", "/")
 }
 
-func (a *App) ExecClaude(projectID string, skipPermissions bool) error {
+// BuildClaudeCommand returns the shell command string for launching claude.
+func BuildClaudeCommand(projectID, sessionID string, skipPermissions bool) string {
 	dir := projectIDToPath(projectID)
 	claudeCmd := "claude"
 	if skipPermissions {
 		claudeCmd = "claude --dangerously-skip-permissions"
 	}
-	script := fmt.Sprintf("cd %s && %s", dir, claudeCmd)
-	return exec.Command("osascript",
-		"-e", `tell application "Terminal" to activate`,
-		"-e", fmt.Sprintf(`tell application "Terminal" to do script %q`, script),
-	).Run()
+	if sessionID != "" {
+		claudeCmd += " --resume " + sessionID
+	}
+	return fmt.Sprintf("cd %s && %s", dir, claudeCmd)
+}
+
+// GetClaudeCommand returns the command string so the frontend can display/copy it.
+func (a *App) GetClaudeCommand(projectID, sessionID string, skipPermissions bool) string {
+	return BuildClaudeCommand(projectID, sessionID, skipPermissions)
+}
+
+type terminalLauncher func(script string) error
+
+var terminalLaunchers = map[string]terminalLauncher{
+	"Terminal": func(script string) error {
+		return exec.Command("osascript",
+			"-e", `tell application "Terminal" to activate`,
+			"-e", fmt.Sprintf(`tell application "Terminal" to do script %q`, script),
+		).Run()
+	},
+	"iTerm2": func(script string) error {
+		apple := fmt.Sprintf(`tell application "iTerm"
+	activate
+	set newWindow to (create window with default profile)
+	tell current session of newWindow
+		write text %q
+	end tell
+end tell`, script)
+		return exec.Command("osascript", "-e", apple).Run()
+	},
+	"Ghostty": func(script string) error {
+		return exec.Command("open", "-na", "Ghostty", "--args", "-e", "sh", "-c", script).Run()
+	},
+	"Alacritty": func(script string) error {
+		return exec.Command("alacritty", "-e", "sh", "-c", script).Start()
+	},
+	"Kitty": func(script string) error {
+		return exec.Command("kitty", "sh", "-c", script).Start()
+	},
+	"WezTerm": func(script string) error {
+		return exec.Command("wezterm", "start", "--", "sh", "-c", script).Start()
+	},
+}
+
+// GetAvailableTerminals returns terminal names that are installed.
+func (a *App) GetAvailableTerminals() []string {
+	// app bundles to check in /Applications
+	appBundles := map[string]string{
+		"iTerm2":    "iTerm.app",
+		"Ghostty":   "Ghostty.app",
+		"Alacritty": "Alacritty.app",
+		"Kitty":     "kitty.app",
+		"WezTerm":   "WezTerm.app",
+	}
+	// CLI commands to check in PATH
+	cliNames := map[string]string{
+		"Ghostty":   "ghostty",
+		"Alacritty": "alacritty",
+		"Kitty":     "kitty",
+		"WezTerm":   "wezterm",
+	}
+
+	available := []string{"Terminal"} // Terminal.app is always available on macOS
+	seen := map[string]bool{"Terminal": true}
+
+	for name, bundle := range appBundles {
+		if seen[name] {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join("/Applications", bundle)); err == nil {
+			available = append(available, name)
+			seen[name] = true
+		}
+	}
+	for name, cli := range cliNames {
+		if seen[name] {
+			continue
+		}
+		if _, err := exec.LookPath(cli); err == nil {
+			available = append(available, name)
+			seen[name] = true
+		}
+	}
+	sort.Strings(available)
+	return available
+}
+
+func (a *App) ExecClaude(projectID string, sessionID string, skipPermissions bool, terminal string) error {
+	script := BuildClaudeCommand(projectID, sessionID, skipPermissions)
+	launcher, ok := terminalLaunchers[terminal]
+	if !ok {
+		launcher = terminalLaunchers["Terminal"]
+	}
+	return launcher(script)
 }
 
 // InsertMessage inserts a new message immediately after afterUUID.
@@ -840,64 +965,84 @@ func (a *App) SummarizeMessages(projectID, sessionID string, uuids []string) (st
 	return strings.TrimSpace(out), nil
 }
 
-var idealizeSchema = `{"type":"object","properties":{"messages":{"type":"array","items":{"type":"object","properties":{"role":{"type":"string","enum":["user","assistant"]},"content":{"type":"array","items":{"type":"object","properties":{"type":{"type":"string","enum":["text","tool_use","tool_result"]},"text":{"type":"string"},"id":{"type":"string"},"name":{"type":"string"},"input":{"type":"object"},"tool_use_id":{"type":"string"},"content":{"type":"string"}},"required":["type"]}}},"required":["role","content"]}}},"required":["messages"]}`
+const idealizeSystemPrompt = `You are an expert at cleaning up Claude Code conversation histories for context engineering.
 
-const idealizeSystemPrompt = `You are rewriting a conversation to its ideal form — the version that would have occurred if everything went perfectly on the first try.
+You have two modes. Choose the best one for the situation:
 
-Rules:
-- Remove all errors, failed attempts, retries, and unnecessary detours
-- The correct approach is taken immediately every time
-- Tool calls return correct results on the first try (regenerate realistic tool_result content)
-- Keep all semantically important exchanges; remove only waste
-- Preserve the overall goal and outcome
-- Output ONLY the idealized messages array in the required JSON format`
+MODE "actions" — Per-message triage. For each message, decide:
+- "delete": errors, failed attempts, retries, unnecessary detours, verbose outputs that add no value
+- "keep": essential context, correct approaches, important decisions
+- "edit": messages worth keeping but with wasted content (trim unnecessary parts, fix errors). Provide the cleaned text in edited_content.
+Use this mode when most messages can be kept as-is or simply deleted.
 
-// IdealizeMessages generates an idealized version of the selected messages using claude.
-// Returns JSON string of the idealized messages array.
+MODE "rewrite" — Full rewrite. Output a new sequence of messages (role + content) that replaces the entire selection.
+Use this mode when the conversation is too messy for per-message triage and needs a clean rewrite.
+
+Be aggressive about deleting waste. Preserve the minimum context needed to understand what happened and continue the work.`
+
+// buildIdealizeSchema generates a JSON schema with mode field to choose actions or rewrite.
+func buildIdealizeSchema(uuids []string) string {
+	uuidEnum, _ := json.Marshal(uuids)
+	return fmt.Sprintf(`{"type":"object","properties":{"mode":{"type":"string","enum":["actions","rewrite"]},"actions":{"type":"array","items":{"type":"object","properties":{"uuid":{"type":"string","enum":%s},"action":{"type":"string","enum":["delete","keep","edit"]},"edited_content":{"type":"string"}},"required":["uuid","action"]}},"messages":{"type":"array","items":{"type":"object","properties":{"role":{"type":"string","enum":["user","assistant"]},"content":{"type":"string"}},"required":["role","content"]}}},"required":["mode"]}`,
+		string(uuidEnum))
+}
+
+// IdealizeMessages analyzes selected messages and returns either:
+// - {"mode":"actions","actions":[{uuid,action,edited_content}]} for per-message triage
+// - {"mode":"rewrite","messages":[{role,content}]} for full rewrite
 func (a *App) IdealizeMessages(projectID, sessionID string, uuids []string) (string, error) {
 	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
 	uuidSet := make(map[string]bool, len(uuids))
 	for _, u := range uuids {
 		uuidSet[u] = true
 	}
-	msgs, err := extractSelectedMessages(path, uuidSet)
+
+	// Read messages with UUIDs attached
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	if len(msgs) == 0 {
+	defer f.Close()
+
+	type msgWithUUID struct {
+		UUID    string          `json:"uuid"`
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	var labeled []msgWithUUID
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var d map[string]json.RawMessage
+		if json.Unmarshal(scanner.Bytes(), &d) != nil {
+			continue
+		}
+		var uuid string
+		json.Unmarshal(d["uuid"], &uuid)
+		if !uuidSet[uuid] {
+			continue
+		}
+		var msg map[string]json.RawMessage
+		json.Unmarshal(d["message"], &msg)
+		var role string
+		json.Unmarshal(msg["role"], &role)
+		labeled = append(labeled, msgWithUUID{UUID: uuid, Role: role, Content: msg["content"]})
+	}
+
+	if len(labeled) == 0 {
 		return "", fmt.Errorf("no selected messages found")
 	}
 
-	// Serialize messages as JSON for the prompt
-	msgsJSON, _ := json.MarshalIndent(msgs, "", "  ")
-	prompt := "Rewrite the following conversation in its ideal form and output it as structured JSON matching the schema:\n\n" + string(msgsJSON)
+	schema := buildIdealizeSchema(uuids)
+	msgsJSON, _ := json.MarshalIndent(labeled, "", "  ")
+	prompt := "Analyze each message and decide delete/keep/edit, or rewrite entirely:\n\n" + string(msgsJSON)
 
-	out, err := runClaudeStreaming(a.ctx, prompt, idealizeSchema, idealizeSystemPrompt)
+	out, err := runClaudeWithSystem(prompt, schema, idealizeSystemPrompt)
 	if err != nil {
 		return "", fmt.Errorf("claude failed: %w", err)
 	}
 
-	// out may be the JSON object directly, or a JSON-encoded string containing it
-	extract := func(s string) (string, error) {
-		var wrapper struct {
-			Messages json.RawMessage `json:"messages"`
-		}
-		if err := json.Unmarshal([]byte(s), &wrapper); err != nil {
-			return "", fmt.Errorf("parse failed: %w\nraw: %s", err, s)
-		}
-		return string(wrapper.Messages), nil
-	}
-
-	if result, err := extract(out); err == nil {
-		return result, nil
-	}
-	var inner string
-	if json.Unmarshal([]byte(out), &inner) == nil {
-		if result, err := extract(inner); err == nil {
-			return result, nil
-		}
-	}
-	return "", fmt.Errorf("parse failed\nraw: %s", out)
+	return out, nil
 }
 
 // ApplyIdealized creates a new session replacing the selected range with idealized messages.
@@ -1098,7 +1243,7 @@ func runClaude(prompt, jsonSchema string) (string, error) {
 
 // runClaudeStreaming streams output tokens via Wails events and returns the final result.
 func runClaudeStreaming(ctx context.Context, prompt, jsonSchema, systemPrompt string) (string, error) {
-	args := []string{"-p", "--output-format", "stream-json", "--verbose", "--effort", "low", "--model", "claude-sonnet-4-6"}
+	args := []string{"-p", "--output-format", "stream-json", "--verbose", "--effort", "low", "--model", "claude-sonnet-4-6", "--max-turns", "1"}
 	if jsonSchema != "" {
 		args = append(args, "--json-schema", jsonSchema)
 	}
@@ -1170,7 +1315,7 @@ func runClaudeStreaming(ctx context.Context, prompt, jsonSchema, systemPrompt st
 }
 
 func runClaudeWithSystem(prompt, jsonSchema, systemPrompt string) (string, error) {
-	args := []string{"-p", "--output-format", "json", "--effort", "low", "--model", "claude-sonnet-4-6"}
+	args := []string{"-p", "--output-format", "json", "--effort", "low", "--model", "claude-sonnet-4-6", "--max-turns", "3", "--tools", ""}
 	if jsonSchema != "" {
 		args = append(args, "--json-schema", jsonSchema)
 	}
@@ -1183,8 +1328,28 @@ func runClaudeWithSystem(prompt, jsonSchema, systemPrompt string) (string, error
 	cmd := exec.Command("claude", args...)
 	out, err := cmd.Output()
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("%s", strings.TrimSpace(string(ee.Stderr)))
+		// If we got output despite error (e.g. error_max_turns), try to parse it
+		if ee, ok := err.(*exec.ExitError); ok {
+			combined := out
+			if len(combined) == 0 {
+				combined = ee.Stderr
+			}
+			if len(combined) > 0 {
+				// Try parsing as JSON - may contain structured_output despite exit error
+				var envelope map[string]json.RawMessage
+				if json.Unmarshal(combined, &envelope) == nil {
+					if so, ok := envelope["structured_output"]; ok && string(so) != "null" {
+						return string(so), nil
+					}
+					if r, ok := envelope["result"]; ok {
+						var s string
+						if json.Unmarshal(r, &s) == nil && s != "" {
+							return strings.TrimSpace(s), nil
+						}
+					}
+				}
+				return "", fmt.Errorf("%s", strings.TrimSpace(string(combined)))
+			}
 		}
 		return "", err
 	}

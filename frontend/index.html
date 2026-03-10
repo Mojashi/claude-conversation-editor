@@ -53,9 +53,10 @@
   .spacer { flex: 1; }
   .toolbar-sep { width: 1px; height: 20px; background: #30363d; }
 
-  .conv-heatmap { height: 24px; display: flex; flex-shrink: 0; cursor: pointer; border-bottom: 1px solid #21262d; background: #0d1117; }
+  .conv-heatmap { height: 24px; display: flex; flex-shrink: 0; cursor: crosshair; border-bottom: 1px solid #21262d; background: #0d1117; user-select: none; }
   .conv-heatmap-cell { flex: 1; min-width: 1px; position: relative; }
   .conv-heatmap-cell:hover { outline: 1px solid #e6edf3; z-index: 1; }
+  .conv-heatmap-cell.hm-range { outline: 2px solid #58a6ff; z-index: 2; }
   .conv-heatmap-cell .tooltip { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-size: 10px; color: #e6edf3; white-space: nowrap; z-index: 10; pointer-events: none; }
   .conv-heatmap-cell:hover .tooltip { display: block; }
   .conv-messages { overflow-y: auto; flex: 1; padding: 12px 16px; }
@@ -165,7 +166,7 @@
       <button class="btn btn-default" onclick="toggleSidechain()">Sidechain</button>
       <button class="btn btn-default" onclick="loadConversation(currentSession)" title="Reload conversation">↺</button>
       <div class="spacer"></div>
-      <button class="btn btn-default" onclick="showExecDialog()">▶ Exec</button>
+      <button class="btn btn-default" onclick="showExecDialog()">▶ Launch</button>
       <button class="btn btn-default" id="idealize-btn" onclick="startIdealize()" disabled>✨ Idealize</button>
       <button class="btn btn-default" id="summarize-btn" onclick="startSummarize()" disabled>⚗ Summarize</button>
       <button class="btn btn-danger" id="delete-btn" onclick="deleteSelected()" disabled>Delete Selected</button>
@@ -213,13 +214,21 @@
 
 <!-- Exec dialog -->
 <div class="overlay" id="exec-overlay" onclick="hideExecDialog(event)">
-  <div class="dialog" style="min-width:360px" onclick="event.stopPropagation()">
-    <h2>▶ Exec Claude Code</h2>
+  <div class="dialog" style="min-width:400px" onclick="event.stopPropagation()">
+    <h2>▶ Launch Claude Code</h2>
     <p style="margin:12px 0;font-size:13px;color:#8b949e" id="exec-path"></p>
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;padding:10px;background:#0d1117;border-radius:6px">
-      <input type="checkbox" id="exec-skip-perms" style="width:14px;height:14px;accent-color:#f85149">
+      <input type="checkbox" id="exec-skip-perms" style="width:14px;height:14px;accent-color:#f85149" onchange="updateExecCommand()">
       <span><code style="color:#f85149">--dangerously-skip-permissions</code></span>
     </label>
+    <div style="margin-top:12px;display:flex;align-items:center;gap:8px">
+      <label style="font-size:13px;color:#8b949e;white-space:nowrap">Terminal:</label>
+      <select id="exec-terminal" style="flex:1;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:6px 8px;font-size:13px"></select>
+    </div>
+    <div style="margin-top:12px;position:relative">
+      <pre id="exec-cmd-preview" style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px 36px 10px 10px;font-size:12px;color:#c9d1d9;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin:0"></pre>
+      <button onclick="copyExecCommand()" title="Copy command" style="position:absolute;top:6px;right:6px;background:none;border:1px solid #30363d;border-radius:4px;color:#8b949e;cursor:pointer;padding:2px 6px;font-size:14px" id="exec-copy-btn">⧉</button>
+    </div>
     <div class="dialog-actions">
       <button class="btn btn-default" onclick="hideExecDialog()">Cancel</button>
       <button class="btn btn-success" onclick="execClaude()">Launch</button>
@@ -273,7 +282,9 @@ async function inv(cmd, args) {
     if (cmd === 'apply_summary') return go.ApplySummary(args.project_id, args.session_id, args.uuids, args.summary);
     if (cmd === 'idealize_messages') return go.IdealizeMessages(args.project_id, args.session_id, args.uuids);
     if (cmd === 'apply_idealized') return go.ApplyIdealized(args.project_id, args.session_id, args.uuids, args.messages_json);
-    if (cmd === 'exec_claude') return go.ExecClaude(args.project_id, args.skip_permissions);
+    if (cmd === 'exec_claude') return go.ExecClaude(args.project_id, args.session_id, args.skip_permissions, args.terminal);
+    if (cmd === 'get_available_terminals') return go.GetAvailableTerminals();
+    if (cmd === 'get_claude_command') return go.GetClaudeCommand(args.project_id, args.session_id, args.skip_permissions);
     if (cmd === 'insert_message') return go.InsertMessage(args.project_id, args.session_id, args.after_uuid, args.role, args.text);
   }
   // fallback fetch for dev
@@ -706,12 +717,47 @@ async function commitInsert() {
   }
 }
 
-function showExecDialog() {
+async function showExecDialog() {
   if (!currentProject) return;
   const path = '/' + currentProject.replace(/-/g, '/').replace(/^\//, '');
   document.getElementById('exec-path').textContent = path;
   document.getElementById('exec-skip-perms').checked = false;
+
+  // populate terminal dropdown
+  const sel = document.getElementById('exec-terminal');
+  sel.innerHTML = '';
+  try {
+    const terminals = await inv('get_available_terminals');
+    terminals.forEach(t => {
+      const opt = document.createElement('option');
+      opt.value = t; opt.textContent = t;
+      sel.appendChild(opt);
+    });
+  } catch(_) {
+    const opt = document.createElement('option');
+    opt.value = 'Terminal'; opt.textContent = 'Terminal';
+    sel.appendChild(opt);
+  }
+
+  updateExecCommand();
   document.getElementById('exec-overlay').classList.add('show');
+}
+
+async function updateExecCommand() {
+  const skip = document.getElementById('exec-skip-perms').checked;
+  try {
+    const cmd = await inv('get_claude_command', { project_id: currentProject, session_id: currentSession || '', skip_permissions: skip });
+    document.getElementById('exec-cmd-preview').textContent = cmd;
+  } catch(_) {}
+}
+
+function copyExecCommand() {
+  const cmd = document.getElementById('exec-cmd-preview').textContent;
+  navigator.clipboard.writeText(cmd).then(() => {
+    const btn = document.getElementById('exec-copy-btn');
+    btn.textContent = '✓';
+    setTimeout(() => btn.textContent = '⧉', 1500);
+  });
 }
 
 function hideExecDialog(e) {
@@ -721,10 +767,11 @@ function hideExecDialog(e) {
 
 async function execClaude() {
   const skip = document.getElementById('exec-skip-perms').checked;
+  const terminal = document.getElementById('exec-terminal').value;
   hideExecDialog();
   try {
-    await inv('exec_claude', { project_id: currentProject, skip_permissions: skip });
-    setStatus('Launched Claude Code in Terminal.');
+    await inv('exec_claude', { project_id: currentProject, session_id: currentSession || '', skip_permissions: skip, terminal: terminal });
+    setStatus('Launched Claude Code in ' + terminal + '.');
   } catch(e) {
     setStatus('Exec failed: ' + e);
   }
@@ -738,6 +785,7 @@ async function startIdealize() {
   document.getElementById('idealize-desc').textContent =
     `${pendingIdealizeUuids.length} messages selected. Generating idealized conversation...`;
   document.getElementById('idealize-ta').value = '';
+  document.getElementById('idealize-preview').innerHTML = '';
   document.getElementById('idealize-apply-btn').disabled = true;
   document.getElementById('idealize-overlay').classList.add('show');
   setStatus('Idealizing with Claude...');
@@ -760,17 +808,25 @@ async function startIdealize() {
   }
 
   try {
-    const json = await inv('idealize_messages', {
+    const raw = await inv('idealize_messages', {
       project_id: currentProject,
       session_id: currentSession,
       uuids: pendingIdealizeUuids,
     });
     if (window.runtime) window.runtime.EventsOff('claude:stream');
-    const parsed = JSON.parse(json);
+    // Handle possible double-JSON-encoding
+    let parsed = JSON.parse(raw);
+    if (typeof parsed === 'string') parsed = JSON.parse(parsed);
     document.getElementById('idealize-ta').value = JSON.stringify(parsed, null, 2);
+    console.log('idealize result:', parsed);
     renderIdealizePreview(parsed);
+    const mode = parsed.mode || 'actions';
+    const items = mode === 'rewrite' ? (parsed.messages || []) : (parsed.actions || []);
+    const count = items.length;
     document.getElementById('idealize-desc').textContent =
-      `${parsed.length} messages generated. Review and apply.`;
+      mode === 'rewrite'
+        ? `Rewrite mode: ${count} messages generated. Review and apply.`
+        : `Actions mode: ${count} per-message actions. Review and apply.`;
     document.getElementById('idealize-apply-btn').disabled = false;
     setStatus('Idealization ready.');
   } catch(e) {
@@ -780,18 +836,61 @@ async function startIdealize() {
   }
 }
 
-function renderIdealizePreview(msgs) {
+function renderIdealizePreview(parsed) {
   const container = document.getElementById('idealize-preview');
-  container.innerHTML = msgs.map(m => {
-    const roleClass = m.role === 'user' ? 'role-user' : 'role-assistant';
-    let contentHtml = '';
-    if (Array.isArray(m.content)) {
-      contentHtml = m.content.map(c => renderContentBlock(c)).join('');
-    } else if (typeof m.content === 'string') {
-      contentHtml = `<div class="msg-text">${escHtml(m.content.slice(0, 2000))}</div>`;
-    }
-    return `<div style="margin-bottom:6px"><div class="msg-card ${roleClass}" style="border-radius:6px;overflow:hidden"><div class="msg-header"><span class="role-badge">${m.role}</span></div><div class="msg-content">${contentHtml || '<span style="color:#484f58">—</span>'}</div></div></div>`;
-  }).join('');
+  const mode = parsed.mode || 'actions';
+
+  if (mode === 'rewrite') {
+    // Rewrite mode: show new messages as chat bubbles
+    container.innerHTML = (parsed.messages || []).map(m => {
+      const roleClass = m.role === 'user' ? 'role-user' : 'role-assistant';
+      let contentHtml = '';
+      if (Array.isArray(m.content)) {
+        contentHtml = m.content.map(c => renderContentBlock(c)).join('');
+      } else if (typeof m.content === 'string') {
+        contentHtml = `<div class="msg-text">${escHtml(m.content.slice(0, 2000))}</div>`;
+      }
+      return `<div style="margin-bottom:6px"><div class="msg-card ${roleClass}" style="border-radius:6px;overflow:hidden"><div class="msg-header"><span class="role-badge">${m.role}</span></div><div class="msg-content">${contentHtml || '<span style="color:#484f58">—</span>'}</div></div></div>`;
+    }).join('');
+  } else {
+    // Actions mode: show per-message actions with color coding
+    const msgMap = {};
+    allMessages.forEach(m => { msgMap[m.uuid] = m; });
+    container.innerHTML = (parsed.actions || []).map(a => {
+      const orig = msgMap[a.uuid];
+      const role = orig ? orig.role : '?';
+      const roleClass = role === 'user' ? 'role-user' : 'role-assistant';
+      const actionColors = { delete: '#f85149', keep: '#3fb950', edit: '#d29922' };
+      const actionColor = actionColors[a.action] || '#8b949e';
+      // Extract text from original message raw content
+      let preview = '';
+      if (orig?.raw?.message?.content) {
+        const content = orig.raw.message.content;
+        if (Array.isArray(content)) {
+          preview = content.map(c => {
+            if (c.type === 'text') return c.text || '';
+            if (c.type === 'tool_use') return `[tool: ${c.name}]`;
+            if (c.type === 'tool_result') return typeof c.content === 'string' ? c.content : '[tool result]';
+            return '';
+          }).filter(Boolean).join('\n').slice(0, 500);
+        } else if (typeof content === 'string') {
+          preview = content.slice(0, 500);
+        }
+      }
+      if (!preview && orig?.content_summary?.text_preview) {
+        preview = orig.content_summary.text_preview.slice(0, 500);
+      }
+      let editedHtml = '';
+      if (a.action === 'edit' && a.edited_content) {
+        editedHtml = `<div style="margin-top:4px;padding:6px 8px;background:#1c2128;border-left:2px solid ${actionColor};font-size:12px;color:#e6edf3"><strong style="color:${actionColor}">Edited:</strong> ${escHtml(a.edited_content.slice(0, 500))}</div>`;
+      }
+      return `<div style="margin-bottom:4px;opacity:${a.action === 'delete' ? 0.5 : 1}">
+        <div class="msg-card ${roleClass}" style="border-radius:6px;overflow:hidden;border-left:3px solid ${actionColor}">
+          <div class="msg-header"><span class="role-badge">${role}</span><span style="margin-left:auto;font-size:11px;color:${actionColor};font-weight:600">${a.action.toUpperCase()}</span></div>
+          <div class="msg-content"><div class="msg-text" style="font-size:12px;color:#8b949e;white-space:pre-wrap">${escHtml(preview) || '—'}</div>${editedHtml}</div>
+        </div></div>`;
+    }).join('');
+  }
 }
 
 function hideIdealizeDialog(e) {
@@ -809,59 +908,97 @@ function generateUUID() {
 async function applyIdealized() {
   const jsonStr = document.getElementById('idealize-ta').value.trim();
   if (!jsonStr) return;
-  let idealMsgs;
-  try { idealMsgs = JSON.parse(jsonStr); } catch(e) { setStatus('Invalid JSON: ' + e); return; }
+  let parsed;
+  try { parsed = JSON.parse(jsonStr); } catch(e) { setStatus('Invalid JSON: ' + e); return; }
   pushUndo();
   hideIdealizeDialog();
 
-  // Find first selected message's parentUuid
-  const firstSelIdx = allMessages.findIndex(m => pendingIdealizeUuids.includes(m.uuid));
-  const firstParentUuid = firstSelIdx > 0 ? allMessages[firstSelIdx - 1]?.uuid : null;
+  const mode = parsed.mode || 'actions';
 
-  // Build JSONL lines and fake allMessages entries for the idealized messages
-  const newLines = [];
-  const newMsgObjects = [];
-  let prevUuid = firstParentUuid;
-  for (const im of idealMsgs) {
-    const uuid = generateUUID();
-    const rawLine = JSON.stringify({
-      uuid,
-      parentUuid: prevUuid,
-      type: im.role,
-      timestamp: new Date().toISOString(),
-      message: { role: im.role, content: im.content },
-    });
-    newLines.push(rawLine);
-    newMsgObjects.push({
-      uuid,
-      parentUuid: prevUuid,
-      role: im.role,
-      type: im.role,
-      timestamp: new Date().toISOString(),
-      isSidechain: false,
-      is_tool_only: false,
-      content_summary: { types: ['text'], text_preview: '', size: JSON.stringify(im.content).length },
-      raw: JSON.parse(rawLine),
-    });
-    prevUuid = uuid;
+  if (mode === 'rewrite') {
+    // Rewrite mode: replace selected messages with new ones
+    const firstSelIdx = allMessages.findIndex(m => pendingIdealizeUuids.includes(m.uuid));
+    const firstParentUuid = firstSelIdx > 0 ? allMessages[firstSelIdx - 1]?.uuid : null;
+
+    const newLines = [];
+    const newMsgObjects = [];
+    let prevUuid = firstParentUuid;
+    for (const im of parsed.messages) {
+      const uuid = generateUUID();
+      const content = typeof im.content === 'string' ? [{ type: 'text', text: im.content }] : im.content;
+      const rawLine = JSON.stringify({
+        uuid,
+        parentUuid: prevUuid,
+        type: im.role,
+        timestamp: new Date().toISOString(),
+        message: { role: im.role, content },
+      });
+      newLines.push(rawLine);
+      newMsgObjects.push({
+        uuid,
+        parentUuid: prevUuid,
+        role: im.role,
+        type: im.role,
+        timestamp: new Date().toISOString(),
+        isSidechain: false,
+        is_tool_only: false,
+        content_summary: { types: ['text'], text_preview: typeof im.content === 'string' ? im.content.slice(0, 100) : '', size: JSON.stringify(content).length },
+        raw: JSON.parse(rawLine),
+      });
+      prevUuid = uuid;
+    }
+
+    pendingInsertLines = newLines;
+    pendingDeletedUuids = [...pendingIdealizeUuids];
+
+    const selSet = new Set(pendingIdealizeUuids);
+    const firstIdx = allMessages.findIndex(m => selSet.has(m.uuid));
+    allMessages = allMessages.filter(m => !selSet.has(m.uuid));
+    allMessages.splice(firstIdx, 0, ...newMsgObjects);
+    pendingIdealizeUuids.forEach(u => deletedUuids.add(u));
+
+    setStatus(`Applied rewrite (${parsed.messages.length} messages). Click Save to write.`);
+  } else {
+    // Actions mode: apply per-message delete/keep/edit
+    const toDelete = [];
+    const toKeep = [];
+    const editLines = [];
+    for (const a of parsed.actions) {
+      if (a.action === 'delete') {
+        toDelete.push(a.uuid);
+      } else if (a.action === 'keep') {
+        toKeep.push(a.uuid);
+      } else if (a.action === 'edit' && a.edited_content) {
+        toKeep.push(a.uuid); // edited messages are kept
+        const msg = allMessages.find(m => m.uuid === a.uuid);
+        if (msg) {
+          const newContent = [{ type: 'text', text: a.edited_content }];
+          msg.raw.message = { role: msg.role, content: newContent };
+          msg.content_summary = { types: ['text'], text_preview: a.edited_content.slice(0, 100), size: a.edited_content.length };
+          const newRaw = { ...msg.raw };
+          newRaw.message = { role: msg.role, content: newContent };
+          editLines.push(JSON.stringify(newRaw));
+        }
+      }
+    }
+
+    // Keep/edit: remove from deletedUuids (unselect)
+    toKeep.forEach(u => deletedUuids.delete(u));
+    // Delete: ensure in deletedUuids
+    toDelete.forEach(u => deletedUuids.add(u));
+    pendingDeletedUuids = [...new Set([...(pendingDeletedUuids || []), ...toDelete])];
+    if (editLines.length > 0) {
+      pendingInsertLines = [...(pendingInsertLines || []), ...editLines];
+    }
+
+    const deleteCount = toDelete.length;
+    const editCount = parsed.actions.filter(a => a.action === 'edit').length;
+    const keepCount = parsed.actions.filter(a => a.action === 'keep').length;
+    setStatus(`Actions applied: ${deleteCount} deleted, ${editCount} edited, ${keepCount} kept. Click Save to write.`);
   }
-
-  // Store for Save
-  pendingInsertLines = newLines;
-  pendingDeletedUuids = [...pendingIdealizeUuids];
-
-  // Update allMessages in place: remove selected, insert new at that position
-  const selSet = new Set(pendingIdealizeUuids);
-  const firstIdx = allMessages.findIndex(m => selSet.has(m.uuid));
-  allMessages = allMessages.filter(m => !selSet.has(m.uuid));
-  allMessages.splice(firstIdx, 0, ...newMsgObjects);
-
-  // Mark selected as deleted so Save knows to skip originals
-  pendingIdealizeUuids.forEach(u => deletedUuids.add(u));
 
   renderConversation();
   updateButtons();
-  setStatus(`Applied idealized conversation. Click Save to write.`);
 }
 
 let pendingSummaryUuids = [];
@@ -993,6 +1130,10 @@ function wasteColor(score) {
   return `rgb(${Math.min(255,r)},${Math.min(255,g)},${Math.min(255,b)})`;
 }
 
+let hmDragStart = null;
+let hmDragEnd = null;
+let hmDragging = false;
+
 function renderHeatmap() {
   const container = document.getElementById('conv-heatmap');
   if (!allMessages.length) { container.style.display = 'none'; return; }
@@ -1003,8 +1144,68 @@ function renderHeatmap() {
     const color = wasteColor(w.score);
     const deleted = deletedUuids.has(msg.uuid);
     const opacity = deleted ? 0.2 : 1;
-    return `<div class="conv-heatmap-cell" style="background:${color};opacity:${opacity}" onclick="scrollToMsg(${i})"><span class="tooltip">#${i+1} ${msg.role} · ${w.label} · ${formatSize(w.size)}</span></div>`;
+    return `<div class="conv-heatmap-cell" data-idx="${i}" style="background:${color};opacity:${opacity}"><span class="tooltip">#${i+1} ${msg.role} · ${w.label} · ${formatSize(w.size)}</span></div>`;
   }).join('');
+
+  // Drag selection handlers
+  container.onmousedown = (e) => {
+    const cell = e.target.closest('.conv-heatmap-cell');
+    if (!cell) return;
+    hmDragStart = parseInt(cell.dataset.idx);
+    hmDragEnd = hmDragStart;
+    hmDragging = true;
+    updateHeatmapRange();
+    e.preventDefault();
+  };
+  container.onmousemove = (e) => {
+    if (!hmDragging) return;
+    const cell = e.target.closest('.conv-heatmap-cell');
+    if (!cell) return;
+    hmDragEnd = parseInt(cell.dataset.idx);
+    updateHeatmapRange();
+  };
+  container.onmouseup = (e) => {
+    if (!hmDragging) return;
+    hmDragging = false;
+    const lo = Math.min(hmDragStart, hmDragEnd);
+    const hi = Math.max(hmDragStart, hmDragEnd);
+    if (lo === hi) {
+      // Single click = scroll to message
+      scrollToMsg(lo);
+      clearHeatmapRange();
+      return;
+    }
+    // Range select: toggle selection for range
+    pushUndo();
+    const rangeUuids = allMessages.slice(lo, hi + 1).map(m => m.uuid);
+    const allSelected = rangeUuids.every(u => deletedUuids.has(u));
+    for (let i = lo; i <= hi; i++) {
+      setMessageChecked(i, !allSelected);
+    }
+    clearHeatmapRange();
+    updateSizeInfo();
+    updateButtons();
+    renderHeatmap();
+  };
+  container.onmouseleave = () => {
+    if (hmDragging) {
+      hmDragging = false;
+      clearHeatmapRange();
+    }
+  };
+}
+
+function updateHeatmapRange() {
+  const lo = Math.min(hmDragStart, hmDragEnd);
+  const hi = Math.max(hmDragStart, hmDragEnd);
+  document.querySelectorAll('.conv-heatmap-cell').forEach(cell => {
+    const idx = parseInt(cell.dataset.idx);
+    cell.classList.toggle('hm-range', idx >= lo && idx <= hi);
+  });
+}
+
+function clearHeatmapRange() {
+  document.querySelectorAll('.conv-heatmap-cell.hm-range').forEach(c => c.classList.remove('hm-range'));
 }
 
 function scrollToMsg(index) {

@@ -16,7 +16,11 @@ export function DoUpdate(arg1:string):Promise<void>;
 
 export function EditMessage(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
-export function ExecClaude(arg1:string,arg2:boolean):Promise<void>;
+export function ExecClaude(arg1:string,arg2:string,arg3:boolean,arg4:string):Promise<void>;
+
+export function GetAvailableTerminals():Promise<Array<string>>;
+
+export function GetClaudeCommand(arg1:string,arg2:string,arg3:boolean):Promise<string>;
 
 export function GetConversation(arg1:string,arg2:string):Promise<main.Conversation>;
 
