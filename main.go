@@ -171,10 +171,64 @@ func runUpdate() {
 	}
 
 	fmt.Printf("Downloading v%s...\n", info.LatestVersion)
-	if err := app.DoUpdate(info.DownloadURL); err != nil {
+	if err := cliUpdate(info.DownloadURL, info.LatestVersion); err != nil {
 		fmt.Fprintln(os.Stderr, "Update failed:", err)
 		os.Exit(1)
 	}
+}
+
+func cliUpdate(downloadURL, newVersion string) error {
+	tmpZip := filepath.Join(os.TempDir(), "surgery-update.zip")
+	if err := downloadFile(downloadURL, tmpZip); err != nil {
+		return fmt.Errorf("download: %w", err)
+	}
+
+	tmpDir := filepath.Join(os.TempDir(), "surgery-update")
+	os.RemoveAll(tmpDir)
+	os.MkdirAll(tmpDir, 0755)
+	if err := unzip(tmpZip, tmpDir); err != nil {
+		return fmt.Errorf("unzip: %w", err)
+	}
+
+	matches, _ := filepath.Glob(filepath.Join(tmpDir, "*.app"))
+	if len(matches) == 0 {
+		return fmt.Errorf("no .app found in zip")
+	}
+	newApp := matches[0]
+
+	// Resolve current exe (follow symlink)
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+
+	// Walk up to find .app bundle
+	appBundle := exe
+	for !strings.HasSuffix(appBundle, ".app") {
+		parent := filepath.Dir(appBundle)
+		if parent == appBundle {
+			// Not inside a .app — just replace the binary directly
+			appBundle = exe
+			newBin := filepath.Join(newApp, "Contents", "MacOS", "surgery")
+			if err := exec.Command("cp", newBin, appBundle).Run(); err != nil {
+				return fmt.Errorf("replace binary: %w", err)
+			}
+			fmt.Printf("Updated to v%s. Run surgery again.\n", newVersion)
+			return nil
+		}
+		appBundle = parent
+	}
+
+	// Replace entire .app bundle
+	os.RemoveAll(appBundle)
+	if err := exec.Command("cp", "-r", newApp, appBundle).Run(); err != nil {
+		return fmt.Errorf("replace .app: %w", err)
+	}
+	fmt.Printf("Updated to v%s. Run surgery again.\n", newVersion)
+	return nil
 }
 
 func runGUI(startupProject, startupSession string) {
