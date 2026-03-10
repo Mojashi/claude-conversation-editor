@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Code Conversation Editor</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #e6edf3; height: 100vh; display: flex; flex-direction: column; }
+
+  /* Header */
+  header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 16px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  header h1 { font-size: 14px; font-weight: 600; color: #58a6ff; }
+  header .status { font-size: 12px; color: #8b949e; margin-left: auto; }
+  header .version { font-size: 11px; color: #484f58; }
+  .update-badge { font-size: 11px; padding: 2px 8px; background: #1a3a1a; border: 1px solid #3fb950; color: #3fb950; border-radius: 4px; cursor: pointer; }
+  .update-badge:hover { background: #1f4a1f; }
+
+  /* Layout */
+  .layout { display: flex; flex: 1; overflow: hidden; }
+
+  /* Panels */
+  .panel { display: flex; flex-direction: column; border-right: 1px solid #30363d; overflow: hidden; }
+  .panel-header { padding: 10px 12px; font-size: 11px; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #21262d; background: #161b22; flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
+  .panel-header .count { background: #30363d; color: #8b949e; font-size: 10px; padding: 1px 6px; border-radius: 10px; }
+  .panel-list { overflow-y: auto; flex: 1; }
+
+  /* Panels widths */
+  #projects-panel { width: 200px; min-width: 160px; }
+  #sessions-panel { width: 260px; min-width: 200px; }
+  #conversation-panel { flex: 1; border-right: none; }
+
+  /* List items */
+  .list-item { padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #21262d; transition: background 0.1s; }
+  .list-item:hover { background: #1c2128; }
+  .list-item.active { background: #1f3a5f; border-left: 3px solid #58a6ff; }
+  .list-item .name { font-size: 12px; font-weight: 500; color: #e6edf3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .list-item .meta { font-size: 11px; color: #8b949e; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Conversation area */
+  .conv-toolbar { padding: 8px 16px; border-bottom: 1px solid #21262d; background: #161b22; display: flex; align-items: center; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+  .conv-toolbar .size-info { font-size: 11px; color: #8b949e; }
+  .conv-toolbar .size-info.has-selection { color: #f85149; }
+  .btn { padding: 5px 12px; font-size: 12px; border: 1px solid; border-radius: 6px; cursor: pointer; font-weight: 500; transition: all 0.1s; }
+  .btn-danger { background: #21262d; border-color: #f85149; color: #f85149; }
+  .btn-danger:hover { background: #3a1a1a; }
+  .btn-danger:disabled { opacity: 0.4; cursor: default; }
+  .btn-success { background: #21262d; border-color: #3fb950; color: #3fb950; }
+  .btn-success:hover { background: #1a3a1a; }
+  .btn-success:disabled { opacity: 0.4; cursor: default; }
+  .btn-default { background: #21262d; border-color: #30363d; color: #e6edf3; }
+  .btn-default:hover { background: #2d333b; }
+  .spacer { flex: 1; }
+  .toolbar-sep { width: 1px; height: 20px; background: #30363d; }
+
+  .conv-messages { overflow-y: auto; flex: 1; padding: 12px 16px; }
+
+  /* Messages */
+  .message { display: flex; gap: 10px; margin-bottom: 8px; align-items: flex-start; }
+  .message.hidden { display: none; }
+  .msg-checkbox { margin-top: 4px; width: 14px; height: 14px; flex-shrink: 0; cursor: pointer; accent-color: #f85149; }
+  .msg-body { flex: 1; min-width: 0; }
+  .msg-card { border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+  .msg-card.selected { border-color: #f85149; background: #1a0a0a; }
+  .msg-card.sidechain { opacity: 0.5; border-style: dashed; }
+
+  .msg-header { padding: 6px 10px; display: flex; align-items: center; gap: 8px; font-size: 11px; background: #161b22; border-bottom: 1px solid #21262d; cursor: pointer; user-select: none; }
+  .msg-header:hover { background: #1c2128; }
+  .role-badge { padding: 2px 7px; border-radius: 4px; font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .role-user .role-badge { background: #0d419d; color: #79c0ff; }
+  .role-assistant .role-badge { background: #1a4428; color: #56d364; }
+  .msg-types { display: flex; gap: 4px; flex-wrap: wrap; }
+  .type-tag { padding: 1px 6px; border-radius: 4px; font-size: 10px; background: #30363d; color: #8b949e; }
+  .type-tag.tool_use { background: #2a1f00; color: #d29922; }
+  .type-tag.tool_result { background: #1a2a1a; color: #56d364; }
+  .type-tag.thinking { background: #1a1a3a; color: #79c0ff; }
+  .msg-ts { color: #484f58; margin-left: auto; }
+  .msg-size { color: #484f58; }
+  .truncate-btn { padding: 2px 8px; font-size: 10px; border: 1px solid #30363d; border-radius: 4px; background: transparent; color: #8b949e; cursor: pointer; }
+  .truncate-btn:hover { border-color: #d29922; color: #d29922; background: #1a1500; }
+
+  .msg-content { padding: 10px; font-size: 12px; line-height: 1.6; color: #e6edf3; }
+  .msg-content.collapsed { display: none; }
+  .msg-text { white-space: pre-wrap; word-break: break-word; }
+  .tool-detail { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px; margin-top: 6px; font-size: 11px; }
+  .tool-name { color: #d29922; font-weight: 600; margin-bottom: 4px; }
+  .tool-body { color: #8b949e; white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow-y: auto; }
+  .tool-result-ok { color: #56d364; }
+  .tool-result-err { color: #f85149; }
+
+  .empty-state { padding: 40px; text-align: center; color: #8b949e; font-size: 13px; }
+  .empty-state .icon { font-size: 32px; margin-bottom: 12px; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+  /* Save dialog */
+  .overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100; align-items: center; justify-content: center; }
+  .overlay.show { display: flex; }
+  .dialog { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 24px; min-width: 360px; max-width: 480px; }
+  .dialog h2 { font-size: 16px; margin-bottom: 12px; }
+  .dialog p { font-size: 13px; color: #8b949e; margin-bottom: 8px; }
+  .dialog .stat { background: #0d1117; border-radius: 6px; padding: 12px; margin: 12px 0; font-size: 12px; }
+  .dialog .stat-row { display: flex; justify-content: space-between; padding: 3px 0; }
+  .dialog .stat-row .label { color: #8b949e; }
+  .dialog .stat-row .value { font-weight: 600; }
+  .dialog .value.red { color: #f85149; }
+  .dialog .value.green { color: #3fb950; }
+  .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+  .loading { text-align: center; padding: 40px; color: #8b949e; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ Surgery</h1>
+  <span class="status" id="status-bar">Ready</span>
+  <span class="version" id="version-badge"></span>
+  <span id="update-badge"></span>
+</header>
+
+<div class="layout">
+  <!-- Projects panel -->
+  <div class="panel" id="projects-panel">
+    <div class="panel-header">Projects <span class="count" id="project-count">0</span></div>
+    <div class="panel-list" id="project-list">
+      <div class="loading">Loading...</div>
+    </div>
+  </div>
+
+  <!-- Sessions panel -->
+  <div class="panel" id="sessions-panel">
+    <div class="panel-header">Sessions <span class="count" id="session-count">0</span></div>
+    <div class="panel-list" id="session-list">
+      <div class="empty-state"><div class="icon">📂</div>Select a project</div>
+    </div>
+  </div>
+
+  <!-- Conversation panel -->
+  <div class="panel" id="conversation-panel">
+    <div class="conv-toolbar" id="conv-toolbar" style="display:none">
+      <span class="size-info" id="size-info">0 B</span>
+      <div class="toolbar-sep"></div>
+      <button class="btn btn-default" onclick="selectAll(true)">All</button>
+      <button class="btn btn-default" onclick="selectAll(false)">None</button>
+      <button class="btn btn-default" onclick="toggleTools()">Tools</button>
+      <button class="btn btn-default" onclick="toggleSidechain()">Sidechain</button>
+      <div class="spacer"></div>
+      <button class="btn btn-danger" id="delete-btn" onclick="deleteSelected()" disabled>Delete Selected</button>
+      <button class="btn btn-success" id="save-btn" onclick="showSaveDialog()" disabled>Save</button>
+    </div>
+    <div class="conv-messages" id="conv-messages">
+      <div class="empty-state"><div class="icon">💬</div>Select a session</div>
+    </div>
+  </div>
+</div>
+
+<!-- Save dialog -->
+<div class="overlay" id="save-overlay" onclick="hideSaveDialog(event)">
+  <div class="dialog" onclick="event.stopPropagation()">
+    <h2>Save Changes</h2>
+    <p>The original file will be backed up as <code>.jsonl.bak</code>.</p>
+    <div class="stat" id="save-stat"></div>
+    <div class="dialog-actions">
+      <button class="btn btn-default" onclick="hideSaveDialog()">Cancel</button>
+      <button class="btn btn-success" onclick="executeSave()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const go = window.go?.main?.App;
+async function inv(cmd, args) {
+  // Wails: window.go.main.App.Method(args...)
+  if (go) {
+    if (cmd === 'list_projects') return go.ListProjects();
+    if (cmd === 'list_sessions') return go.ListSessions(args.project_id);
+    if (cmd === 'get_conversation') return go.GetConversation(args.project_id, args.session_id);
+    if (cmd === 'save_conversation') return go.SaveConversation(args.project_id, args.session_id, args.req);
+  }
+  // fallback fetch for dev
+  const map = {
+    list_projects: () => fetch('/api/projects').then(r => r.json()),
+    list_sessions: (a) => fetch(`/api/sessions/${a.project_id}`).then(r => r.json()),
+    get_conversation: (a) => fetch(`/api/conversation/${a.project_id}/${a.session_id}`).then(r => r.json()),
+    save_conversation: (a) => fetch(`/api/conversation/${a.project_id}/${a.session_id}`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({keep_uuids:a.req.keep_uuids})}).then(r => r.json()),
+  };
+  return map[cmd](args);
+}
+
+let currentProject = null;
+let currentSession = null;
+let allMessages = [];   // parsed messages from API
+let deletedUuids = new Set();  // UUIDs marked for deletion
+let showTools = true;
+let showSidechain = false;
+let lastCheckedIndex = null;
+
+// Utilities
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1024/1024).toFixed(2) + ' MB';
+}
+
+function formatDate(ts) {
+  if (!ts) return '';
+  const d = new Date(typeof ts === 'number' ? ts*1000 : ts);
+  return d.toLocaleString('ja-JP', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function setStatus(msg) {
+  document.getElementById('status-bar').textContent = msg;
+}
+
+// Projects
+async function loadProjects() {
+  const projects = await inv('list_projects');
+  const list = document.getElementById('project-list');
+  document.getElementById('project-count').textContent = projects.length;
+
+  if (!projects.length) {
+    list.innerHTML = '<div class="empty-state">No projects</div>';
+    return;
+  }
+
+  list.innerHTML = projects.map(p => `
+    <div class="list-item" onclick="selectProject('${p.id}', this)" data-id="${p.id}">
+      <div class="name" title="${p.name}">${p.name}</div>
+      <div class="meta">${p.session_count} sessions · ${formatDate(p.mtime)}</div>
+    </div>
+  `).join('');
+}
+
+async function selectProject(projectId, el) {
+  currentProject = projectId;
+  currentSession = null;
+  document.querySelectorAll('#project-list .list-item').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  clearConversation();
+  await loadSessions(projectId);
+}
+
+// Sessions
+async function loadSessions(projectId) {
+  const list = document.getElementById('session-list');
+  list.innerHTML = '<div class="loading">Loading...</div>';
+
+  const sessions = await inv('list_sessions', { project_id: projectId });
+  document.getElementById('session-count').textContent = sessions.length;
+
+  if (!sessions.length) {
+    list.innerHTML = '<div class="empty-state">No sessions</div>';
+    return;
+  }
+
+  list.innerHTML = sessions.map(s => `
+    <div class="list-item" onclick="selectSession('${s.id}', this)" data-id="${s.id}">
+      <div class="name" title="${s.preview}">${s.preview || '(empty)'}</div>
+      <div class="meta">${s.msg_count} msgs · ${formatSize(s.size)} · ${formatDate(s.mtime)}</div>
+    </div>
+  `).join('');
+}
+
+async function selectSession(sessionId, el) {
+  currentSession = sessionId;
+  document.querySelectorAll('#session-list .list-item').forEach(e => e.classList.remove('active'));
+  el.classList.add('active');
+  await loadConversation(sessionId);
+}
+
+// Conversation
+function clearConversation() {
+  allMessages = [];
+  deletedUuids = new Set();
+  document.getElementById('conv-messages').innerHTML = '<div class="empty-state"><div class="icon">💬</div>Select a session</div>';
+  document.getElementById('conv-toolbar').style.display = 'none';
+  document.getElementById('session-list').innerHTML = '<div class="empty-state"><div class="icon">📂</div>Select a project</div>';
+}
+
+async function loadConversation(sessionId) {
+  const messages = document.getElementById('conv-messages');
+  messages.innerHTML = '<div class="loading">Loading...</div>';
+  deletedUuids = new Set();
+  lastCheckedIndex = null;
+
+  const data = await inv('get_conversation', { project_id: currentProject, session_id: sessionId });
+
+  allMessages = data.messages;
+  document.getElementById('conv-toolbar').style.display = 'flex';
+  renderConversation(data.total_size);
+}
+
+function renderConversation(totalSize) {
+  const container = document.getElementById('conv-messages');
+  if (!allMessages.length) {
+    container.innerHTML = '<div class="empty-state">No messages</div>';
+    return;
+  }
+
+  container.innerHTML = allMessages.map((msg, i) => renderMessage(msg, i)).join('');
+  updateSizeInfo(totalSize);
+  updateButtons();
+}
+
+function renderMessage(msg, index) {
+  const isDeleted = deletedUuids.has(msg.uuid);
+  const isSide = msg.isSidechain;
+  const cs = msg.content_summary;
+
+  const typeTags = cs.types.map(t => `<span class="type-tag ${t}">${t}</span>`).join('');
+
+  let contentHtml = '';
+  const rawContent = msg.raw?.message?.content;
+
+  if (Array.isArray(rawContent)) {
+    contentHtml = rawContent.map(c => renderContentBlock(c)).join('');
+  } else if (typeof rawContent === 'string') {
+    const trimmed = rawContent.replace(/<[^>]+>/g, '').trim();
+    if (trimmed) contentHtml = `<div class="msg-text">${escHtml(trimmed.slice(0, 2000))}</div>`;
+  }
+
+  const usageHtml = msg.usage ? `<span class="msg-size">${(msg.usage.input_tokens || 0) + (msg.usage.output_tokens || 0)} tok</span>` : `<span class="msg-size">${formatSize(cs.size)}</span>`;
+
+  return `
+    <div class="message ${isDeleted ? 'deleted-msg' : ''}" id="msg-${index}"
+         data-uuid="${msg.uuid || ''}" data-index="${index}">
+      <input type="checkbox" class="msg-checkbox" ${isDeleted ? 'checked' : ''}
+             onclick="handleCheckboxClick(event, ${index})" />
+      <div class="msg-body">
+        <div class="msg-card role-${msg.role} ${isDeleted ? 'selected' : ''} ${isSide ? 'sidechain' : ''}">
+          <div class="msg-header" onclick="toggleContent(${index})">
+            <span class="role-badge">${msg.role}</span>
+            <span class="msg-types">${typeTags}</span>
+            ${usageHtml}
+            <span class="msg-ts">${formatDate(msg.timestamp)}</span>
+            <button class="truncate-btn" onclick="event.stopPropagation(); truncateFrom(${index})" title="Keep only up to this message">✂ Truncate after</button>
+          </div>
+          <div class="msg-content" id="content-${index}">
+            ${contentHtml || `<span style="color:#484f58">— no text content —</span>`}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderContentBlock(c) {
+  const type = c.type;
+  if (type === 'text') {
+    const text = c.text || '';
+    return `<div class="msg-text">${escHtml(text.slice(0, 3000))}${text.length > 3000 ? '\n… (truncated)' : ''}</div>`;
+  }
+  if (type === 'thinking') {
+    return `<div class="tool-detail"><div class="tool-name">💭 thinking</div><div class="tool-body">${escHtml((c.thinking||'').slice(0, 500))}…</div></div>`;
+  }
+  if (type === 'tool_use') {
+    const input = JSON.stringify(c.input || {}, null, 2);
+    return `<div class="tool-detail"><div class="tool-name">🔧 ${escHtml(c.name || 'tool')}</div><div class="tool-body">${escHtml(input.slice(0, 500))}${input.length > 500 ? '\n…' : ''}</div></div>`;
+  }
+  if (type === 'tool_result') {
+    const isErr = c.is_error;
+    const content = Array.isArray(c.content)
+      ? c.content.map(x => x.text || '').join('\n')
+      : (c.content || '');
+    return `<div class="tool-detail"><div class="tool-name ${isErr ? 'tool-result-err' : 'tool-result-ok'}">${isErr ? '❌' : '✅'} result</div><div class="tool-body">${escHtml(content.slice(0, 500))}${content.length > 500 ? '\n…' : ''}</div></div>`;
+  }
+  return `<div class="tool-detail"><div class="tool-body">${escHtml(JSON.stringify(c).slice(0, 200))}</div></div>`;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function toggleContent(index) {
+  const el = document.getElementById(`content-${index}`);
+  el.classList.toggle('collapsed');
+}
+
+// Selection
+function handleCheckboxClick(event, index) {
+  const checked = event.target.checked;
+  if (event.shiftKey && lastCheckedIndex !== null) {
+    const from = Math.min(lastCheckedIndex, index);
+    const to = Math.max(lastCheckedIndex, index);
+    for (let i = from; i <= to; i++) {
+      setMessageChecked(i, checked);
+    }
+  } else {
+    setMessageChecked(index, checked);
+  }
+  lastCheckedIndex = index;
+  updateSizeInfo();
+  updateButtons();
+}
+
+function setMessageChecked(index, checked) {
+  const msg = allMessages[index];
+  if (!msg) return;
+  if (checked) {
+    deletedUuids.add(msg.uuid);
+  } else {
+    deletedUuids.delete(msg.uuid);
+  }
+  const cb = document.querySelector(`#msg-${index} .msg-checkbox`);
+  if (cb) cb.checked = checked;
+  const card = document.querySelector(`#msg-${index} .msg-card`);
+  if (card) card.classList.toggle('selected', checked);
+}
+
+function toggleMessage(index, checked) {
+  setMessageChecked(index, checked);
+  updateSizeInfo();
+  updateButtons();
+}
+
+function truncateFrom(index) {
+  // Delete all messages from index onwards
+  for (let i = index; i < allMessages.length; i++) {
+    deletedUuids.add(allMessages[i].uuid);
+    const cb = document.querySelector(`#msg-${i} .msg-checkbox`);
+    if (cb) cb.checked = true;
+    const card = document.querySelector(`#msg-${i} .msg-card`);
+    if (card) card.classList.add('selected');
+  }
+  updateSizeInfo();
+  updateButtons();
+}
+
+function selectAll(checked) {
+  allMessages.forEach((_, i) => setMessageChecked(i, checked));
+  updateSizeInfo();
+  updateButtons();
+}
+
+function toggleTools() {
+  showTools = !showTools;
+  allMessages.forEach((msg, i) => {
+    if (msg.is_tool_only) {
+      const el = document.getElementById(`msg-${i}`);
+      if (el) el.classList.toggle('hidden', !showTools);
+    }
+  });
+}
+
+function toggleSidechain() {
+  showSidechain = !showSidechain;
+  allMessages.forEach((msg, i) => {
+    if (msg.isSidechain) {
+      const el = document.getElementById(`msg-${i}`);
+      if (el) el.classList.toggle('hidden', !showSidechain);
+    }
+  });
+}
+
+function updateSizeInfo(totalSize) {
+  const el = document.getElementById('size-info');
+  const deletedSize = allMessages
+    .filter(m => deletedUuids.has(m.uuid))
+    .reduce((s, m) => s + (m.content_summary?.size || 0), 0);
+  const totalEstimate = allMessages.reduce((s, m) => s + (m.content_summary?.size || 0), 0);
+
+  if (deletedUuids.size > 0) {
+    el.className = 'size-info has-selection';
+    el.textContent = `${deletedUuids.size} selected to delete (−${formatSize(deletedSize)} / ${formatSize(totalEstimate)})`;
+  } else {
+    el.className = 'size-info';
+    const ts = totalSize !== undefined ? totalSize : totalEstimate;
+    el.textContent = `${allMessages.length} messages · ${formatSize(ts)}`;
+  }
+}
+
+function updateButtons() {
+  const hasDeleted = deletedUuids.size > 0;
+  document.getElementById('delete-btn').disabled = !hasDeleted;
+  document.getElementById('save-btn').disabled = !hasDeleted;
+}
+
+function deleteSelected() {
+  // Visually hide deleted messages (not saved yet)
+  deletedUuids.forEach(uuid => {
+    const el = document.querySelector(`[data-uuid="${uuid}"]`);
+    if (el) el.classList.add('hidden');
+  });
+  updateSizeInfo();
+  setStatus(`${deletedUuids.size} messages marked for deletion. Click Save to write.`);
+}
+
+// Save dialog
+function showSaveDialog() {
+  const keepCount = allMessages.filter(m => !deletedUuids.has(m.uuid)).length;
+  const deleteCount = deletedUuids.size;
+  const deletedSize = allMessages
+    .filter(m => deletedUuids.has(m.uuid))
+    .reduce((s, m) => s + (m.content_summary?.size || 0), 0);
+  const totalEstimate = allMessages.reduce((s, m) => s + (m.content_summary?.size || 0), 0);
+
+  document.getElementById('save-stat').innerHTML = `
+    <div class="stat-row"><span class="label">Total messages</span><span class="value">${allMessages.length}</span></div>
+    <div class="stat-row"><span class="label">Messages to delete</span><span class="value red">−${deleteCount}</span></div>
+    <div class="stat-row"><span class="label">Messages to keep</span><span class="value green">${keepCount}</span></div>
+    <div class="stat-row"><span class="label">Estimated size reduction</span><span class="value red">−${formatSize(deletedSize)}</span></div>
+  `;
+  document.getElementById('save-overlay').classList.add('show');
+}
+
+function hideSaveDialog(e) {
+  if (e && e.target !== document.getElementById('save-overlay')) return;
+  document.getElementById('save-overlay').classList.remove('show');
+}
+
+async function executeSave() {
+  hideSaveDialog();
+  const keepUuids = allMessages
+    .filter(m => !deletedUuids.has(m.uuid))
+    .map(m => m.uuid)
+    .filter(Boolean);
+
+  setStatus('Saving...');
+  try {
+    const data = await inv('save_conversation', {
+      project_id: currentProject,
+      session_id: currentSession,
+      req: { keep_uuids: keepUuids },
+    });
+    setStatus(`Saved! ${formatSize(data.new_size)} · backup: ${data.backup}`);
+    // Reload
+    await loadConversation(currentSession);
+    await loadSessions(currentProject);
+  } catch (e) {
+    setStatus('Error: ' + e.message);
+  }
+}
+
+// Init: handle #project=X&session=Y from surgery.sh
+async function initFromHash() {
+  const hash = location.hash.slice(1);
+  if (!hash) { await loadProjects(); return; }
+
+  const params = Object.fromEntries(hash.split('&').map(p => p.split('=')));
+  await loadProjects();
+
+  if (params.project) {
+    const el = document.querySelector(`#project-list [data-id="${params.project}"]`);
+    if (el) {
+      el.classList.add('active');
+      currentProject = params.project;
+      await loadSessions(params.project);
+
+      if (params.session) {
+        const sel = document.querySelector(`#session-list [data-id="${params.session}"]`);
+        if (sel) {
+          sel.classList.add('active');
+          await selectSession(params.session, sel);
+        }
+      }
+    }
+  }
+}
+
+function waitForWails(cb) {
+  if (window.go?.main?.App) { cb(); return; }
+  setTimeout(() => waitForWails(cb), 50);
+}
+async function checkUpdate() {
+  try {
+    const info = await go.CheckUpdate();
+    document.getElementById('version-badge').textContent = `v${info.current_version}`;
+    if (info.has_update && info.download_url) {
+      const badge = document.getElementById('update-badge');
+      badge.innerHTML = `<span class="update-badge" onclick="doUpdate('${info.download_url}')">↑ v${info.latest_version} available</span>`;
+    }
+  } catch(e) {}
+}
+
+async function doUpdate(url) {
+  setStatus('Downloading update...');
+  try {
+    await go.DoUpdate(url);
+  } catch(e) {
+    setStatus('Update failed: ' + e);
+  }
+}
+
+waitForWails(async () => {
+  Object.assign(go, window.go.main.App);
+  const args = await go.GetStartupArgs();
+  if (args.project && args.session) {
+    await loadProjects();
+    const pel = document.querySelector(`#project-list [data-id="${args.project}"]`);
+    if (pel) { pel.classList.add('active'); currentProject = args.project; }
+    await loadSessions(args.project);
+    const sel = document.querySelector(`#session-list [data-id="${args.session}"]`);
+    if (sel) { sel.classList.add('active'); await selectSession(args.session, sel); }
+  } else {
+    initFromHash();
+  }
+  checkUpdate();
+});
+</script>
+</body>
+</html>

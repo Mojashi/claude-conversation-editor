@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Install frontend deps
+        run: cd frontend && npm install
+
+      - name: Build
+        run: wails build -platform darwin/arm64,darwin/amd64
+
+      - name: Zip arm64
+        run: |
+          cd build/bin
+          zip -r surgery-darwin-arm64.zip surgery.app
+          zip -r surgery-darwin-amd64.zip surgery.app
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/bin/surgery-darwin-arm64.zip
+            build/bin/surgery-darwin-amd64.zip
+          generate_release_notes: true
