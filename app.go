@@ -1142,13 +1142,17 @@ func runClaudeStreaming(ctx context.Context, prompt, jsonSchema, systemPrompt st
 				runtime.EventsEmit(ctx, "claude:stream", line)
 			}
 		case "result":
-			// result may be a string or an object
-			raw := event["result"]
-			var s string
-			if json.Unmarshal(raw, &s) == nil {
-				finalResult = s
+			// structured_output has the JSON schema result; result is plain text
+			if so, ok := event["structured_output"]; ok && string(so) != "null" {
+				finalResult = string(so)
 			} else {
-				finalResult = string(raw)
+				raw := event["result"]
+				var s string
+				if json.Unmarshal(raw, &s) == nil {
+					finalResult = s
+				} else {
+					finalResult = string(raw)
+				}
 			}
 		}
 	}
@@ -1185,18 +1189,30 @@ func runClaudeWithSystem(prompt, jsonSchema, systemPrompt string) (string, error
 		return "", err
 	}
 
-	// Parse JSON envelope: {"type":"result","result":"..."}
-	var envelope struct {
-		Result string `json:"result"`
-		Error  string `json:"error"`
-	}
+	// Parse JSON envelope
+	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(out, &envelope); err != nil {
 		return strings.TrimSpace(string(out)), nil
 	}
-	if envelope.Error != "" {
-		return "", fmt.Errorf("%s", envelope.Error)
+	if errField, ok := envelope["error"]; ok {
+		var e string
+		json.Unmarshal(errField, &e)
+		if e != "" {
+			return "", fmt.Errorf("%s", e)
+		}
 	}
-	return strings.TrimSpace(envelope.Result), nil
+	// structured_output takes priority (for --json-schema)
+	if so, ok := envelope["structured_output"]; ok && string(so) != "null" {
+		return string(so), nil
+	}
+	var result string
+	if r, ok := envelope["result"]; ok {
+		if json.Unmarshal(r, &result) == nil {
+			return strings.TrimSpace(result), nil
+		}
+		return string(r), nil
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // ApplySummary replaces the selected messages with a single summary user message.
