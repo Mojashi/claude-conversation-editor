@@ -189,7 +189,7 @@ async function inv(cmd, args) {
     if (cmd === 'get_conversation') return go.GetConversation(args.project_id, args.session_id);
     if (cmd === 'save_conversation') return go.SaveConversation(args.project_id, args.session_id, args.req);
     if (cmd === 'edit_message') return go.EditMessage(args.project_id, args.session_id, args.uuid, args.new_text);
-    if (cmd === 'branch_from') return go.BranchFrom(args.project_id, args.session_id, args.uuid);
+    if (cmd === 'branch_new_session') return go.BranchNewSession(args.project_id, args.session_id, args.uuid);
     if (cmd === 'restore_sidechain') return go.RestoreSidechain(args.project_id, args.session_id, args.uuid);
   }
   // fallback fetch for dev
@@ -350,10 +350,7 @@ function renderMessage(msg, index) {
             <span class="msg-ts">${formatDate(msg.timestamp)}</span>
             <button class="truncate-btn" onclick="event.stopPropagation(); truncateFrom(${index})" title="Keep only up to this message">✂ Truncate after</button>
             <button class="edit-btn" onclick="event.stopPropagation(); startEdit(${index})" title="Edit message content">✏ Edit</button>
-            ${isSide
-              ? `<button class="restore-btn" onclick="event.stopPropagation(); restoreSidechain(${index})" title="Restore sidechain from this message">↩ Restore</button>`
-              : `<button class="branch-btn" onclick="event.stopPropagation(); branchFrom(${index})" title="Branch from this message (mark descendants as sidechain)">⎇ Branch</button>`
-            }
+            <button class="branch-btn" onclick="event.stopPropagation(); branchFrom(${index})" title="Create new session branching from this message">⎇ Branch</button>
           </div>
           <div class="msg-content" id="content-${index}">
             ${contentHtml || `<span style="color:#484f58">— no text content —</span>`}
@@ -551,9 +548,16 @@ async function branchFrom(index) {
   if (!msg) return;
   setStatus('Branching...');
   try {
-    await inv('branch_from', { project_id: currentProject, session_id: currentSession, uuid: msg.uuid });
-    setStatus('Branched. Reloading...');
-    await loadConversation(currentSession);
+    const newSessionId = await inv('branch_new_session', {
+      project_id: currentProject,
+      session_id: currentSession,
+      uuid: msg.uuid,
+    });
+    setStatus('Branched to new session.');
+    // reload sessions and navigate to new one
+    await loadSessions(currentProject);
+    const el = document.querySelector(`#session-list [data-id="${newSessionId}"]`);
+    if (el) { el.classList.add('active'); await selectSession(newSessionId, el); }
   } catch(e) {
     setStatus('Branch failed: ' + e);
   }

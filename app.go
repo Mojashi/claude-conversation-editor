@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -591,4 +592,52 @@ func (a *App) BranchFrom(projectID, sessionID, fromUUID string) error {
 
 func (a *App) RestoreSidechain(projectID, sessionID, fromUUID string) error {
 	return a.setSidechainFrom(projectID, sessionID, fromUUID, false)
+}
+
+// BranchNewSession copies all lines up to and including fromUUID into a new session file.
+// Returns the new session ID.
+func (a *App) BranchNewSession(projectID, sessionID, fromUUID string) (string, error) {
+	src := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
+
+	f, err := os.Open(src)
+	if err != nil {
+		return "", err
+	}
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		lines = append(lines, line)
+		// stop after the target message
+		var d map[string]json.RawMessage
+		if json.Unmarshal([]byte(line), &d) == nil {
+			var uuid string
+			json.Unmarshal(d["uuid"], &uuid)
+			if uuid == fromUUID {
+				break
+			}
+		}
+	}
+	f.Close()
+
+	// generate new session ID (UUID v4-ish)
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	newID := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+
+	dst := filepath.Join(claudeDir(), projectID, newID+".jsonl")
+	out, err := os.Create(dst)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range lines {
+		fmt.Fprintln(out, line)
+	}
+	out.Close()
+
+	return newID, nil
 }
