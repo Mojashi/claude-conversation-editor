@@ -24,6 +24,10 @@ func main() {
 	args := os.Args[1:]
 
 	switch {
+	case len(args) >= 1 && (args[0] == "--version" || args[0] == "-v"):
+		fmt.Println(Version)
+		os.Exit(0)
+
 	case len(args) >= 1 && args[0] == "--open":
 		// Open Wails window, optionally with a specific session
 		runGUI(argStr(args, 1), argStr(args, 2))

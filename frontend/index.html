@@ -80,6 +80,10 @@
   .truncate-btn:hover { border-color: #d29922; color: #d29922; background: #1a1500; }
   .edit-btn { padding: 2px 8px; font-size: 10px; border: 1px solid #30363d; border-radius: 4px; background: transparent; color: #8b949e; cursor: pointer; }
   .edit-btn:hover { border-color: #58a6ff; color: #58a6ff; background: #0d1f3a; }
+  .branch-btn { padding: 2px 8px; font-size: 10px; border: 1px solid #30363d; border-radius: 4px; background: transparent; color: #8b949e; cursor: pointer; }
+  .branch-btn:hover { border-color: #a371f7; color: #a371f7; background: #1a0f2e; }
+  .restore-btn { padding: 2px 8px; font-size: 10px; border: 1px solid #a371f7; border-radius: 4px; background: #1a0f2e; color: #a371f7; cursor: pointer; }
+  .restore-btn:hover { background: #220f3a; }
   .edit-area { width: 100%; min-height: 120px; background: #0d1117; border: 1px solid #58a6ff; border-radius: 6px; color: #e6edf3; font-size: 12px; line-height: 1.6; padding: 8px; font-family: inherit; resize: vertical; }
   .edit-actions { display: flex; gap: 6px; margin-top: 6px; }
 
@@ -185,6 +189,8 @@ async function inv(cmd, args) {
     if (cmd === 'get_conversation') return go.GetConversation(args.project_id, args.session_id);
     if (cmd === 'save_conversation') return go.SaveConversation(args.project_id, args.session_id, args.req);
     if (cmd === 'edit_message') return go.EditMessage(args.project_id, args.session_id, args.uuid, args.new_text);
+    if (cmd === 'branch_from') return go.BranchFrom(args.project_id, args.session_id, args.uuid);
+    if (cmd === 'restore_sidechain') return go.RestoreSidechain(args.project_id, args.session_id, args.uuid);
   }
   // fallback fetch for dev
   const map = {
@@ -344,6 +350,10 @@ function renderMessage(msg, index) {
             <span class="msg-ts">${formatDate(msg.timestamp)}</span>
             <button class="truncate-btn" onclick="event.stopPropagation(); truncateFrom(${index})" title="Keep only up to this message">✂ Truncate after</button>
             <button class="edit-btn" onclick="event.stopPropagation(); startEdit(${index})" title="Edit message content">✏ Edit</button>
+            ${isSide
+              ? `<button class="restore-btn" onclick="event.stopPropagation(); restoreSidechain(${index})" title="Restore sidechain from this message">↩ Restore</button>`
+              : `<button class="branch-btn" onclick="event.stopPropagation(); branchFrom(${index})" title="Branch from this message (mark descendants as sidechain)">⎇ Branch</button>`
+            }
           </div>
           <div class="msg-content" id="content-${index}">
             ${contentHtml || `<span style="color:#484f58">— no text content —</span>`}
@@ -533,6 +543,32 @@ async function commitEdit(index) {
     setStatus('Edit saved.');
   } catch(e) {
     setStatus('Edit failed: ' + e);
+  }
+}
+
+async function branchFrom(index) {
+  const msg = allMessages[index];
+  if (!msg) return;
+  setStatus('Branching...');
+  try {
+    await inv('branch_from', { project_id: currentProject, session_id: currentSession, uuid: msg.uuid });
+    setStatus('Branched. Reloading...');
+    await loadConversation(currentSession);
+  } catch(e) {
+    setStatus('Branch failed: ' + e);
+  }
+}
+
+async function restoreSidechain(index) {
+  const msg = allMessages[index];
+  if (!msg) return;
+  setStatus('Restoring sidechain...');
+  try {
+    await inv('restore_sidechain', { project_id: currentProject, session_id: currentSession, uuid: msg.uuid });
+    setStatus('Restored. Reloading...');
+    await loadConversation(currentSession);
+  } catch(e) {
+    setStatus('Restore failed: ' + e);
   }
 }
 

@@ -506,3 +506,89 @@ func (a *App) EditMessage(projectID, sessionID, uuid, newText string) error {
 	out.Close()
 	return nil
 }
+
+// setSidechainFrom sets isSidechain on all descendants of fromUUID (exclusive).
+// If toMain=true, restores them to main (isSidechain=false).
+func (a *App) setSidechainFrom(projectID, sessionID, fromUUID string, toSidechain bool) error {
+	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
+
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	f.Close()
+
+	// Build uuid->parentUuid map and collect all descendants of fromUUID
+	uuidToParent := map[string]string{}
+	for _, line := range lines {
+		var d map[string]json.RawMessage
+		if json.Unmarshal([]byte(line), &d) != nil {
+			continue
+		}
+		var uuid, parent string
+		json.Unmarshal(d["uuid"], &uuid)
+		json.Unmarshal(d["parentUuid"], &parent)
+		if uuid != "" {
+			uuidToParent[uuid] = parent
+		}
+	}
+
+	// Find all descendants (messages whose ancestor chain passes through fromUUID)
+	isDescendant := map[string]bool{}
+	for uuid := range uuidToParent {
+		cur := uuid
+		for cur != "" {
+			if cur == fromUUID {
+				isDescendant[uuid] = true
+				break
+			}
+			cur = uuidToParent[cur]
+		}
+	}
+
+	var updated []string
+	for _, line := range lines {
+		var d map[string]json.RawMessage
+		if json.Unmarshal([]byte(line), &d) != nil {
+			updated = append(updated, line)
+			continue
+		}
+		var uuid string
+		json.Unmarshal(d["uuid"], &uuid)
+		if uuid != "" && isDescendant[uuid] {
+			if toSidechain {
+				d["isSidechain"] = json.RawMessage("true")
+			} else {
+				d["isSidechain"] = json.RawMessage("false")
+			}
+			out, _ := json.Marshal(d)
+			updated = append(updated, string(out))
+		} else {
+			updated = append(updated, line)
+		}
+	}
+
+	out, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	for _, line := range updated {
+		fmt.Fprintln(out, line)
+	}
+	out.Close()
+	return nil
+}
+
+func (a *App) BranchFrom(projectID, sessionID, fromUUID string) error {
+	return a.setSidechainFrom(projectID, sessionID, fromUUID, true)
+}
+
+func (a *App) RestoreSidechain(projectID, sessionID, fromUUID string) error {
+	return a.setSidechainFrom(projectID, sessionID, fromUUID, false)
+}

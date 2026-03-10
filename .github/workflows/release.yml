@@ -29,7 +29,7 @@ jobs:
         run: cd frontend && npm install
 
       - name: Build
-        run: wails build -platform darwin/arm64
+        run: wails build -platform darwin/arm64 -ldflags "-X main.Version=${GITHUB_REF_NAME#v}"
 
       - name: Zip
         run: cd build/bin && zip -r surgery-darwin-arm64.zip *.app
