@@ -53,6 +53,11 @@
   .spacer { flex: 1; }
   .toolbar-sep { width: 1px; height: 20px; background: #30363d; }
 
+  .conv-heatmap { height: 24px; display: flex; flex-shrink: 0; cursor: pointer; border-bottom: 1px solid #21262d; background: #0d1117; }
+  .conv-heatmap-cell { flex: 1; min-width: 1px; position: relative; }
+  .conv-heatmap-cell:hover { outline: 1px solid #e6edf3; z-index: 1; }
+  .conv-heatmap-cell .tooltip { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 4px 8px; font-size: 10px; color: #e6edf3; white-space: nowrap; z-index: 10; pointer-events: none; }
+  .conv-heatmap-cell:hover .tooltip { display: block; }
   .conv-messages { overflow-y: auto; flex: 1; padding: 12px 16px; }
 
   /* Messages */
@@ -166,6 +171,7 @@
       <button class="btn btn-danger" id="delete-btn" onclick="deleteSelected()" disabled>Delete Selected</button>
       <button class="btn btn-success" id="save-btn" onclick="showSaveDialog()" disabled>Save</button>
     </div>
+    <div class="conv-heatmap" id="conv-heatmap" style="display:none"></div>
     <div class="conv-messages" id="conv-messages">
       <div class="empty-state"><div class="icon">💬</div>Select a session</div>
     </div>
@@ -428,6 +434,7 @@ function renderConversation(totalSize) {
   }
 
   container.innerHTML = allMessages.map((msg, i) => renderMessage(msg, i)).join('');
+  renderHeatmap();
   updateSizeInfo(totalSize);
   updateButtons();
 }
@@ -942,6 +949,68 @@ async function restoreSidechain(index) {
   } catch(e) {
     setStatus('Restore failed: ' + e);
   }
+}
+
+function computeWasteScore(msg) {
+  const cs = msg.content_summary;
+  const types = cs?.types || [];
+  const raw = msg.raw?.message?.content;
+
+  let score = 0; // 0=efficient, 1=max waste
+  let label = '';
+
+  // Check for errors in tool_result
+  if (Array.isArray(raw)) {
+    for (const b of raw) {
+      if (b.type === 'tool_result' && b.is_error) { score = 1.0; label = 'error'; break; }
+    }
+  }
+
+  if (!label) {
+    const isToolOnly = types.length > 0 && types.every(t => t === 'tool_use' || t === 'tool_result');
+    if (isToolOnly) {
+      score = 0.5;
+      label = 'tool';
+    } else if (types.includes('thinking')) {
+      score = 0.3;
+      label = 'thinking';
+    } else {
+      score = 0.1;
+      label = 'text';
+    }
+  }
+
+  // Size factor: larger = more waste potential
+  const size = cs?.size || 0;
+  if (size > 5000) score = Math.min(1, score + 0.2);
+
+  return { score, label, size };
+}
+
+function wasteColor(score) {
+  if (score >= 0.8) return '#f85149';
+  if (score >= 0.5) return '#d29922';
+  if (score >= 0.3) return '#3fb950';
+  return '#238636';
+}
+
+function renderHeatmap() {
+  const container = document.getElementById('conv-heatmap');
+  if (!allMessages.length) { container.style.display = 'none'; return; }
+  container.style.display = 'flex';
+
+  container.innerHTML = allMessages.map((msg, i) => {
+    const w = computeWasteScore(msg);
+    const color = wasteColor(w.score);
+    const deleted = deletedUuids.has(msg.uuid);
+    const opacity = deleted ? 0.2 : 1;
+    return `<div class="conv-heatmap-cell" style="background:${color};opacity:${opacity}" onclick="scrollToMsg(${i})"><span class="tooltip">#${i+1} ${msg.role} · ${w.label} · ${formatSize(w.size)}</span></div>`;
+  }).join('');
+}
+
+function scrollToMsg(index) {
+  const el = document.getElementById(`msg-${index}`);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 function updateSizeInfo(totalSize) {
