@@ -28,6 +28,9 @@ func main() {
 		fmt.Println(Version)
 		os.Exit(0)
 
+	case len(args) >= 1 && args[0] == "update":
+		runUpdate()
+
 	case len(args) >= 1 && args[0] == "--open":
 		// Open Wails window, optionally with a specific session
 		runGUI(argStr(args, 1), argStr(args, 2))
@@ -143,6 +146,35 @@ func mostRecentJSONL(projectDir string) string {
 		}
 	}
 	return latest
+}
+
+func runUpdate() {
+	fmt.Printf("surgery %s\n", Version)
+	fmt.Println("Checking for updates...")
+
+	app := &App{}
+	info, err := app.CheckUpdate()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Current: v%s  Latest: v%s\n", info.CurrentVersion, info.LatestVersion)
+
+	if !info.HasUpdate {
+		fmt.Println("Already up to date.")
+		return
+	}
+	if info.DownloadURL == "" {
+		fmt.Fprintln(os.Stderr, "No download URL found for this platform.")
+		os.Exit(1)
+	}
+
+	fmt.Printf("Downloading v%s...\n", info.LatestVersion)
+	if err := app.DoUpdate(info.DownloadURL); err != nil {
+		fmt.Fprintln(os.Stderr, "Update failed:", err)
+		os.Exit(1)
+	}
 }
 
 func runGUI(startupProject, startupSession string) {
