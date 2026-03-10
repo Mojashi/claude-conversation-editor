@@ -421,3 +421,88 @@ func (a *App) SaveConversation(projectID, sessionID string, req SaveRequest) (*S
 		Backup:    backup,
 	}, nil
 }
+
+// EditMessage updates the text content of a specific message.
+func (a *App) EditMessage(projectID, sessionID, uuid, newText string) error {
+	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
+
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	f.Close()
+
+	var updated []string
+	for _, line := range lines {
+		var d map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(line), &d); err != nil {
+			updated = append(updated, line)
+			continue
+		}
+		var u string
+		json.Unmarshal(d["uuid"], &u)
+		if u != uuid {
+			updated = append(updated, line)
+			continue
+		}
+
+		// Update content: replace text block(s) with newText
+		var msg map[string]json.RawMessage
+		json.Unmarshal(d["message"], &msg)
+		content := msg["content"]
+
+		var s string
+		if json.Unmarshal(content, &s) == nil {
+			// String content: replace directly
+			b, _ := json.Marshal(newText)
+			msg["content"] = b
+		} else {
+			var arr []json.RawMessage
+			if json.Unmarshal(content, &arr) == nil {
+				// Array: update all text blocks
+				first := true
+				for i, item := range arr {
+					var block map[string]json.RawMessage
+					if err := json.Unmarshal(item, &block); err != nil {
+						continue
+					}
+					var t string
+					json.Unmarshal(block["type"], &t)
+					if t == "text" {
+						if first {
+							b, _ := json.Marshal(newText)
+							block["text"] = b
+							first = false
+						} else {
+							block["text"] = json.RawMessage(`""`)
+						}
+						arr[i], _ = json.Marshal(block)
+					}
+				}
+				b, _ := json.Marshal(arr)
+				msg["content"] = b
+			}
+		}
+
+		msgBytes, _ := json.Marshal(msg)
+		d["message"] = msgBytes
+		out, _ := json.Marshal(d)
+		updated = append(updated, string(out))
+	}
+
+	out, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	for _, line := range updated {
+		fmt.Fprintln(out, line)
+	}
+	out.Close()
+	return nil
+}

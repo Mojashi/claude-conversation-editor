@@ -78,6 +78,10 @@
   .msg-size { color: #484f58; }
   .truncate-btn { padding: 2px 8px; font-size: 10px; border: 1px solid #30363d; border-radius: 4px; background: transparent; color: #8b949e; cursor: pointer; }
   .truncate-btn:hover { border-color: #d29922; color: #d29922; background: #1a1500; }
+  .edit-btn { padding: 2px 8px; font-size: 10px; border: 1px solid #30363d; border-radius: 4px; background: transparent; color: #8b949e; cursor: pointer; }
+  .edit-btn:hover { border-color: #58a6ff; color: #58a6ff; background: #0d1f3a; }
+  .edit-area { width: 100%; min-height: 120px; background: #0d1117; border: 1px solid #58a6ff; border-radius: 6px; color: #e6edf3; font-size: 12px; line-height: 1.6; padding: 8px; font-family: inherit; resize: vertical; }
+  .edit-actions { display: flex; gap: 6px; margin-top: 6px; }
 
   .msg-content { padding: 10px; font-size: 12px; line-height: 1.6; color: #e6edf3; }
   .msg-content.collapsed { display: none; }
@@ -180,6 +184,7 @@ async function inv(cmd, args) {
     if (cmd === 'list_sessions') return go.ListSessions(args.project_id);
     if (cmd === 'get_conversation') return go.GetConversation(args.project_id, args.session_id);
     if (cmd === 'save_conversation') return go.SaveConversation(args.project_id, args.session_id, args.req);
+    if (cmd === 'edit_message') return go.EditMessage(args.project_id, args.session_id, args.uuid, args.new_text);
   }
   // fallback fetch for dev
   const map = {
@@ -338,6 +343,7 @@ function renderMessage(msg, index) {
             ${usageHtml}
             <span class="msg-ts">${formatDate(msg.timestamp)}</span>
             <button class="truncate-btn" onclick="event.stopPropagation(); truncateFrom(${index})" title="Keep only up to this message">✂ Truncate after</button>
+            <button class="edit-btn" onclick="event.stopPropagation(); startEdit(${index})" title="Edit message content">✏ Edit</button>
           </div>
           <div class="msg-content" id="content-${index}">
             ${contentHtml || `<span style="color:#484f58">— no text content —</span>`}
@@ -454,6 +460,80 @@ function toggleSidechain() {
       if (el) el.classList.toggle('hidden', !showSidechain);
     }
   });
+}
+
+function startEdit(index) {
+  const msg = allMessages[index];
+  if (!msg) return;
+  const contentEl = document.getElementById(`content-${index}`);
+
+  // Extract current text
+  const rawContent = msg.raw?.message?.content;
+  let currentText = '';
+  if (typeof rawContent === 'string') {
+    currentText = rawContent.replace(/<[^>]+>/g, '').trim();
+  } else if (Array.isArray(rawContent)) {
+    currentText = rawContent.filter(c => c.type === 'text').map(c => c.text || '').join('\n');
+  }
+
+  contentEl.innerHTML = `
+    <textarea class="edit-area" id="edit-ta-${index}">${escHtml(currentText)}</textarea>
+    <div class="edit-actions">
+      <button class="btn btn-success" onclick="commitEdit(${index})">Save</button>
+      <button class="btn btn-default" onclick="cancelEdit(${index})">Cancel</button>
+    </div>
+  `;
+  document.getElementById(`edit-ta-${index}`).focus();
+}
+
+function cancelEdit(index) {
+  // Re-render the original content
+  const msg = allMessages[index];
+  const contentEl = document.getElementById(`content-${index}`);
+  const rawContent = msg.raw?.message?.content;
+  let contentHtml = '';
+  if (Array.isArray(rawContent)) {
+    contentHtml = rawContent.map(c => renderContentBlock(c)).join('');
+  } else if (typeof rawContent === 'string') {
+    const trimmed = rawContent.replace(/<[^>]+>/g, '').trim();
+    if (trimmed) contentHtml = `<div class="msg-text">${escHtml(trimmed.slice(0, 2000))}</div>`;
+  }
+  contentEl.innerHTML = contentHtml || `<span style="color:#484f58">— no text content —</span>`;
+}
+
+async function commitEdit(index) {
+  const msg = allMessages[index];
+  const ta = document.getElementById(`edit-ta-${index}`);
+  if (!ta) return;
+  const newText = ta.value;
+
+  setStatus('Saving edit...');
+  try {
+    await inv('edit_message', {
+      project_id: currentProject,
+      session_id: currentSession,
+      uuid: msg.uuid,
+      new_text: newText,
+    });
+    // Update local state
+    const raw = msg.raw;
+    if (typeof raw?.message?.content === 'string') {
+      msg.raw.message.content = newText;
+    } else if (Array.isArray(raw?.message?.content)) {
+      const arr = raw.message.content;
+      let first = true;
+      for (const c of arr) {
+        if (c.type === 'text') {
+          c.text = first ? newText : '';
+          first = false;
+        }
+      }
+    }
+    cancelEdit(index);
+    setStatus('Edit saved.');
+  } catch(e) {
+    setStatus('Edit failed: ' + e);
+  }
 }
 
 function updateSizeInfo(totalSize) {
