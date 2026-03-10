@@ -226,7 +226,11 @@
   <div class="dialog" style="min-width:600px;max-width:800px" onclick="event.stopPropagation()">
     <h2>✨ Idealize</h2>
     <p id="idealize-desc" style="margin-bottom:12px;font-size:13px;color:#8b949e"></p>
-    <textarea id="idealize-ta" class="edit-area" style="min-height:240px;font-size:11px;font-family:monospace"></textarea>
+    <div id="idealize-preview" style="max-height:400px;overflow-y:auto;margin-bottom:12px"></div>
+    <details style="margin-bottom:8px">
+      <summary style="font-size:11px;color:#484f58;cursor:pointer">Edit JSON</summary>
+      <textarea id="idealize-ta" class="edit-area" style="min-height:160px;font-size:11px;font-family:monospace;margin-top:6px"></textarea>
+    </details>
     <div class="dialog-actions">
       <button class="btn btn-default" onclick="hideIdealizeDialog()">Cancel</button>
       <button class="btn btn-success" id="idealize-apply-btn" onclick="applyIdealized()" disabled>Apply</button>
@@ -719,9 +723,11 @@ async function startIdealize() {
       uuids: pendingIdealizeUuids,
     });
     if (window.runtime) window.runtime.EventsOff('claude:stream');
-    document.getElementById('idealize-ta').value = JSON.stringify(JSON.parse(json), null, 2);
+    const parsed = JSON.parse(json);
+    document.getElementById('idealize-ta').value = JSON.stringify(parsed, null, 2);
+    renderIdealizePreview(parsed);
     document.getElementById('idealize-desc').textContent =
-      `Generated. Edit JSON if needed, then apply.`;
+      `${parsed.length} messages generated. Review and apply.`;
     document.getElementById('idealize-apply-btn').disabled = false;
     setStatus('Idealization ready.');
   } catch(e) {
@@ -729,6 +735,20 @@ async function startIdealize() {
     document.getElementById('idealize-desc').textContent = 'Error: ' + e;
     setStatus('Idealize failed: ' + e);
   }
+}
+
+function renderIdealizePreview(msgs) {
+  const container = document.getElementById('idealize-preview');
+  container.innerHTML = msgs.map(m => {
+    const roleClass = m.role === 'user' ? 'role-user' : 'role-assistant';
+    let contentHtml = '';
+    if (Array.isArray(m.content)) {
+      contentHtml = m.content.map(c => renderContentBlock(c)).join('');
+    } else if (typeof m.content === 'string') {
+      contentHtml = `<div class="msg-text">${escHtml(m.content.slice(0, 2000))}</div>`;
+    }
+    return `<div style="margin-bottom:6px"><div class="msg-card ${roleClass}" style="border-radius:6px;overflow:hidden"><div class="msg-header"><span class="role-badge">${m.role}</span></div><div class="msg-content">${contentHtml || '<span style="color:#484f58">—</span>'}</div></div></div>`;
+  }).join('');
 }
 
 function hideIdealizeDialog(e) {
