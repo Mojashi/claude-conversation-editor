@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -640,4 +641,193 @@ func (a *App) BranchNewSession(projectID, sessionID, fromUUID string) (string, e
 	out.Close()
 
 	return newID, nil
+}
+
+// SummarizeMessages calls `claude -p` to summarize the selected messages.
+func (a *App) SummarizeMessages(projectID, sessionID string, uuids []string) (string, error) {
+	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	uuidSet := make(map[string]bool, len(uuids))
+	for _, u := range uuids {
+		uuidSet[u] = true
+	}
+
+	var parts []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var d map[string]json.RawMessage
+		if json.Unmarshal(scanner.Bytes(), &d) != nil {
+			continue
+		}
+		var uuid, t string
+		json.Unmarshal(d["uuid"], &uuid)
+		json.Unmarshal(d["type"], &t)
+		if !uuidSet[uuid] {
+			continue
+		}
+		var msg map[string]json.RawMessage
+		json.Unmarshal(d["message"], &msg)
+		var role string
+		json.Unmarshal(msg["role"], &role)
+
+		text := extractText(msg["content"])
+		if text != "" {
+			parts = append(parts, role+": "+text)
+		}
+	}
+
+	if len(parts) == 0 {
+		return "", fmt.Errorf("no text content in selected messages")
+	}
+
+	prompt := "以下の会話を簡潔にサマリーしてください。重要な決定・発見・コンテキストを保持してください。サマリーのみ出力してください。\n\n" +
+		strings.Join(parts, "\n\n")
+
+	out, err := runClaude(prompt)
+	if err != nil {
+		return "", fmt.Errorf("claude failed: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func extractText(content json.RawMessage) string {
+	var s string
+	if json.Unmarshal(content, &s) == nil {
+		return strings.TrimSpace(s)
+	}
+	var arr []json.RawMessage
+	if json.Unmarshal(content, &arr) != nil {
+		return ""
+	}
+	var texts []string
+	for _, item := range arr {
+		var block map[string]json.RawMessage
+		if json.Unmarshal(item, &block) != nil {
+			continue
+		}
+		var t, text string
+		json.Unmarshal(block["type"], &t)
+		if t == "text" {
+			json.Unmarshal(block["text"], &text)
+			if text != "" {
+				texts = append(texts, text)
+			}
+		}
+	}
+	return strings.Join(texts, "\n")
+}
+
+func runClaude(prompt string) (string, error) {
+	cmd := exec.Command("claude", "-p", "--dangerously-skip-permissions", prompt)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// ApplySummary replaces the selected messages with a single summary user message.
+func (a *App) ApplySummary(projectID, sessionID string, uuids []string, summary string) error {
+	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+
+	uuidSet := make(map[string]bool, len(uuids))
+	for _, u := range uuids {
+		uuidSet[u] = true
+	}
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	f.Close()
+
+	// Find where the first selected message appears and its parentUuid
+	firstIdx := -1
+	var firstParentUUID string
+	for i, line := range lines {
+		var d map[string]json.RawMessage
+		if json.Unmarshal([]byte(line), &d) != nil {
+			continue
+		}
+		var uuid string
+		json.Unmarshal(d["uuid"], &uuid)
+		if uuidSet[uuid] {
+			firstIdx = i
+			json.Unmarshal(d["parentUuid"], &firstParentUUID)
+			break
+		}
+	}
+	if firstIdx < 0 {
+		return fmt.Errorf("selected messages not found")
+	}
+
+	// Generate UUID for summary message
+	b := make([]byte, 16)
+	rand.Read(b)
+	summaryUUID := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+
+	// Build summary message line
+	summaryMsg := map[string]interface{}{
+		"role":    "user",
+		"content": "[Summary]\n" + summary,
+	}
+	summaryMsgBytes, _ := json.Marshal(summaryMsg)
+	summaryLine := map[string]interface{}{
+		"uuid":       summaryUUID,
+		"parentUuid": firstParentUUID,
+		"type":       "user",
+		"timestamp":  "2006-01-02T15:04:05.000Z",
+		"message":    json.RawMessage(summaryMsgBytes),
+		"isSummary":  true,
+	}
+	summaryLineBytes, _ := json.Marshal(summaryLine)
+
+	// Write output: replace selected block with summary message,
+	// update any message whose parentUuid is in uuidSet to point to summaryUUID
+	out, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	inserted := false
+	for _, line := range lines {
+		var d map[string]json.RawMessage
+		if json.Unmarshal([]byte(line), &d) != nil {
+			fmt.Fprintln(out, line)
+			continue
+		}
+		var uuid string
+		json.Unmarshal(d["uuid"], &uuid)
+		if uuidSet[uuid] {
+			if !inserted {
+				fmt.Fprintln(out, string(summaryLineBytes))
+				inserted = true
+			}
+			continue // skip selected messages
+		}
+		// Fix parentUuid if it pointed to a deleted message
+		var parent string
+		json.Unmarshal(d["parentUuid"], &parent)
+		if uuidSet[parent] {
+			d["parentUuid"], _ = json.Marshal(summaryUUID)
+			fixed, _ := json.Marshal(d)
+			fmt.Fprintln(out, string(fixed))
+		} else {
+			fmt.Fprintln(out, line)
+		}
+	}
+	out.Close()
+	return nil
 }

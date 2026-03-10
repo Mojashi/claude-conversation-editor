@@ -158,6 +158,7 @@
       <button class="btn btn-default" onclick="toggleSidechain()">Sidechain</button>
       <button class="btn btn-default" onclick="loadConversation(currentSession)" title="Reload conversation">↺</button>
       <div class="spacer"></div>
+      <button class="btn btn-default" id="summarize-btn" onclick="startSummarize()" disabled>⚗ Summarize</button>
       <button class="btn btn-danger" id="delete-btn" onclick="deleteSelected()" disabled>Delete Selected</button>
       <button class="btn btn-success" id="save-btn" onclick="showSaveDialog()" disabled>Save</button>
     </div>
@@ -180,6 +181,19 @@
   </div>
 </div>
 
+<!-- Summarize dialog -->
+<div class="overlay" id="summarize-overlay" onclick="hideSummarizeDialog(event)">
+  <div class="dialog" style="min-width:520px;max-width:700px" onclick="event.stopPropagation()">
+    <h2>⚗ Summarize</h2>
+    <p id="summarize-desc" style="margin-bottom:12px"></p>
+    <textarea id="summarize-ta" class="edit-area" style="min-height:200px"></textarea>
+    <div class="dialog-actions">
+      <button class="btn btn-default" onclick="hideSummarizeDialog()">Cancel</button>
+      <button class="btn btn-success" id="summarize-apply-btn" onclick="applySummary()">Apply</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const go = window.go?.main?.App;
 async function inv(cmd, args) {
@@ -192,6 +206,8 @@ async function inv(cmd, args) {
     if (cmd === 'edit_message') return go.EditMessage(args.project_id, args.session_id, args.uuid, args.new_text);
     if (cmd === 'branch_new_session') return go.BranchNewSession(args.project_id, args.session_id, args.uuid);
     if (cmd === 'restore_sidechain') return go.RestoreSidechain(args.project_id, args.session_id, args.uuid);
+    if (cmd === 'summarize_messages') return go.SummarizeMessages(args.project_id, args.session_id, args.uuids);
+    if (cmd === 'apply_summary') return go.ApplySummary(args.project_id, args.session_id, args.uuids, args.summary);
   }
   // fallback fetch for dev
   const map = {
@@ -544,6 +560,59 @@ async function commitEdit(index) {
   }
 }
 
+let pendingSummaryUuids = [];
+
+async function startSummarize() {
+  if (deletedUuids.size === 0) return;
+  pendingSummaryUuids = [...deletedUuids];
+  document.getElementById('summarize-desc').textContent =
+    `${pendingSummaryUuids.length} messages selected. Generating summary with Claude...`;
+  document.getElementById('summarize-ta').value = '';
+  document.getElementById('summarize-apply-btn').disabled = true;
+  document.getElementById('summarize-overlay').classList.add('show');
+  setStatus('Summarizing with Claude...');
+  try {
+    const summary = await inv('summarize_messages', {
+      project_id: currentProject,
+      session_id: currentSession,
+      uuids: pendingSummaryUuids,
+    });
+    document.getElementById('summarize-ta').value = summary;
+    document.getElementById('summarize-desc').textContent =
+      `${pendingSummaryUuids.length} messages will be replaced with this summary. You can edit before applying.`;
+    document.getElementById('summarize-apply-btn').disabled = false;
+    setStatus('Summary ready.');
+  } catch(e) {
+    document.getElementById('summarize-desc').textContent = 'Error: ' + e;
+    setStatus('Summarize failed: ' + e);
+  }
+}
+
+function hideSummarizeDialog(e) {
+  if (e && e.target !== document.getElementById('summarize-overlay')) return;
+  document.getElementById('summarize-overlay').classList.remove('show');
+}
+
+async function applySummary() {
+  const summary = document.getElementById('summarize-ta').value.trim();
+  if (!summary) return;
+  hideSummarizeDialog();
+  setStatus('Applying summary...');
+  try {
+    await inv('apply_summary', {
+      project_id: currentProject,
+      session_id: currentSession,
+      uuids: pendingSummaryUuids,
+      summary,
+    });
+    deletedUuids = new Set();
+    setStatus('Summary applied. Reloading...');
+    await loadConversation(currentSession);
+  } catch(e) {
+    setStatus('Apply failed: ' + e);
+  }
+}
+
 async function branchFrom(index) {
   const msg = allMessages[index];
   if (!msg) return;
@@ -598,6 +667,7 @@ function updateButtons() {
   const hasDeleted = deletedUuids.size > 0;
   document.getElementById('delete-btn').disabled = !hasDeleted;
   document.getElementById('save-btn').disabled = !hasDeleted;
+  document.getElementById('summarize-btn').disabled = !hasDeleted;
 }
 
 function deleteSelected() {

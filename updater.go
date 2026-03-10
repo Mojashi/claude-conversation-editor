@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const repoAPI = "https://api.github.com/repos/Mojashi/claude-conversation-editor/releases/latest"
@@ -37,7 +38,8 @@ func (a *App) GetVersion() string {
 }
 
 func (a *App) CheckUpdate() (*UpdateInfo, error) {
-	resp, err := http.Get(repoAPI)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(repoAPI)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check updates: %w", err)
 	}
@@ -85,20 +87,11 @@ func (a *App) DoUpdate(downloadURL string) error {
 		appBundle = parent
 	}
 
-	// zipをダウンロード
+	// zipをダウンロード (curl で進捗表示)
 	tmpZip := os.TempDir() + "/surgery-update.zip"
-	resp, err := http.Get(downloadURL)
-	if err != nil {
+	if err := downloadFile(downloadURL, tmpZip); err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
-	defer resp.Body.Close()
-
-	f, err := os.Create(tmpZip)
-	if err != nil {
-		return err
-	}
-	io.Copy(f, resp.Body)
-	f.Close()
 
 	// 展開してアプリを置き換え
 	tmpDir := os.TempDir() + "/surgery-update"
@@ -126,6 +119,13 @@ func (a *App) DoUpdate(downloadURL string) error {
 	cmd.Process.Release()
 	os.Exit(0)
 	return nil
+}
+
+func downloadFile(url, dest string) error {
+	cmd := exec.Command("curl", "-fsSL", "--progress-bar", "-o", dest, url)
+	cmd.Stdout = os.Stderr // progress bar goes to stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func unzip(src, dest string) error {
