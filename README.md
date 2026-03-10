@@ -6,6 +6,18 @@ Claude Code の会話履歴（JSONL）を編集するネイティブアプリ。
 
 ## インストール
 
+```sh
+curl -fsSL https://raw.githubusercontent.com/Mojashi/claude-conversation-editor/master/install.sh | sh
+```
+
+`~/bin` にPATHが通っていない場合は `SURGERY_BIN_DIR` で指定:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Mojashi/claude-conversation-editor/master/install.sh | SURGERY_BIN_DIR=/usr/local/bin sh
+```
+
+### 手動
+
 [Releases](https://github.com/Mojashi/claude-conversation-editor/releases) から最新の `surgery-darwin-arm64.zip`（Apple Silicon）または `surgery-darwin-amd64.zip`（Intel）をダウンロードして展開。
 
 ```bash
