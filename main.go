@@ -33,8 +33,14 @@ func main() {
 		runWatch(argStr(args, 1), argStr(args, 2), argStr(args, 3))
 
 	default:
-		// CLI entry: output token, start watcher in background, exit
-		runSurgery()
+		if os.Getenv("CLAUDECODE") == "1" {
+			// Inside Claude Code: token-based session detection
+			runSurgery()
+		} else {
+			// Standalone: open GUI directly (auto-detect project from cwd)
+			projectID := deriveProjectID()
+			runGUI(projectID, "")
+		}
 	}
 }
 
@@ -45,14 +51,18 @@ func argStr(args []string, i int) string {
 	return ""
 }
 
+func deriveProjectID() string {
+	cwd, _ := os.Getwd()
+	return "-" + strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
+}
+
 func runSurgery() {
 	b := make([]byte, 8)
 	rand.Read(b)
 	token := "SURGERY_" + strings.ToUpper(hex.EncodeToString(b))
 	fmt.Println(token)
 
-	cwd, _ := os.Getwd()
-	projectID := "-" + strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
+	projectID := deriveProjectID()
 	projectDir := filepath.Join(os.Getenv("HOME"), ".claude", "projects", projectID)
 
 	exe, _ := os.Executable()
