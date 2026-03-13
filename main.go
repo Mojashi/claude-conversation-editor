@@ -69,30 +69,25 @@ func runSurgery() {
 	token := "SURGERY_" + strings.ToUpper(hex.EncodeToString(b))
 	fmt.Println(token)
 
-	projectID := deriveProjectID()
-	projectDir := filepath.Join(os.Getenv("HOME"), ".claude", "projects", projectID)
+	projectsBase := filepath.Join(os.Getenv("HOME"), ".claude", "projects")
 
 	exe, _ := os.Executable()
-	cmd := exec.Command(exe, "--watch", token, projectDir, projectID)
+	cmd := exec.Command(exe, "--watch", token, projectsBase)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Start()
 	cmd.Process.Release()
 	os.Exit(0)
 }
 
-func runWatch(token, projectDir, projectID string) {
-	// Wait for JSONL to be written with our token (after parent bash exits)
-	var jsonlPath string
+func runWatch(token, projectsBase, _ string) {
+	// Search all project directories for the JSONL containing our token
+	var jsonlPath, foundProjectID string
 	for i := 0; i < 10; i++ {
 		time.Sleep(500 * time.Millisecond)
-		jsonlPath = findJSONLWithToken(token, projectDir)
+		jsonlPath, foundProjectID = findJSONLWithTokenAllProjects(token, projectsBase)
 		if jsonlPath != "" {
 			break
 		}
-	}
-	if jsonlPath == "" {
-		// Fallback: most recently modified JSONL
-		jsonlPath = mostRecentJSONL(projectDir)
 	}
 	if jsonlPath == "" {
 		return
@@ -100,29 +95,55 @@ func runWatch(token, projectDir, projectID string) {
 	sessionID := strings.TrimSuffix(filepath.Base(jsonlPath), ".jsonl")
 
 	exe, _ := os.Executable()
-	cmd := exec.Command(exe, "--open", projectID, sessionID)
+	cmd := exec.Command(exe, "--open", foundProjectID, sessionID)
 	cmd.Start()
 }
 
-func findJSONLWithToken(token, projectDir string) string {
-	entries, err := os.ReadDir(projectDir)
+func findJSONLWithTokenAllProjects(token, projectsBase string) (string, string) {
+	projects, err := os.ReadDir(projectsBase)
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) != ".jsonl" {
+	// Only check recently modified projects (within last 30 seconds)
+	cutoff := time.Now().Add(-30 * time.Second)
+	for _, p := range projects {
+		if !p.IsDir() {
 			continue
 		}
-		path := filepath.Join(projectDir, e.Name())
-		data, err := os.ReadFile(path)
+		projectDir := filepath.Join(projectsBase, p.Name())
+		entries, err := os.ReadDir(projectDir)
 		if err != nil {
 			continue
 		}
-		if strings.Contains(string(data), token) {
-			return path
+		for _, e := range entries {
+			if filepath.Ext(e.Name()) != ".jsonl" {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil || info.ModTime().Before(cutoff) {
+				continue
+			}
+			path := filepath.Join(projectDir, e.Name())
+			// Token is near the end of the file; read only the tail
+			f, err := os.Open(path)
+			if err != nil {
+				continue
+			}
+			const tailSize = 4096
+			fi, _ := f.Stat()
+			offset := fi.Size() - tailSize
+			if offset < 0 {
+				offset = 0
+			}
+			buf := make([]byte, tailSize)
+			n, _ := f.ReadAt(buf, offset)
+			f.Close()
+			if strings.Contains(string(buf[:n]), token) {
+				return path, p.Name()
+			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 func mostRecentJSONL(projectDir string) string {
