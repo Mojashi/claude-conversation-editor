@@ -77,12 +77,21 @@ func extractMainChain(entries []*JSONLEntry) []*JSONLEntry {
 		cur = byUUID[*cur.ParentUUID]
 	}
 
-	// Return in file order
+	// Return in file order, deduplicating UUIDs (keep last occurrence,
+	// matching byUUID map behavior where last entry wins).
+	seen := make(map[string]bool)
 	var chain []*JSONLEntry
-	for _, e := range entries {
-		if e.UUID != "" && onChain[e.UUID] {
+	// Iterate in reverse to find last occurrence, then reverse back
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if e.UUID != "" && onChain[e.UUID] && !seen[e.UUID] {
+			seen[e.UUID] = true
 			chain = append(chain, e)
 		}
+	}
+	// Reverse to restore file order
+	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+		chain[i], chain[j] = chain[j], chain[i]
 	}
 	return chain
 }
