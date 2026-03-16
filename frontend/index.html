@@ -104,6 +104,12 @@
   .tool-result-ok { color: #56d364; }
   .tool-result-err { color: #f85149; }
 
+  /* Compaction boundary */
+  .compact-boundary { display: flex; align-items: center; gap: 12px; margin: 16px 0; padding: 0 16px; }
+  .compact-boundary .compact-line { flex: 1; height: 1px; background: linear-gradient(to right, transparent, #d29922, transparent); }
+  .compact-boundary .compact-label { font-size: 11px; font-weight: 600; color: #d29922; background: #1a1500; border: 1px solid #d29922; border-radius: 12px; padding: 3px 12px; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+  .compact-boundary .compact-tokens { font-size: 10px; color: #8b949e; font-weight: 400; }
+
   .empty-state { padding: 40px; text-align: center; color: #8b949e; font-size: 13px; }
   .empty-state .icon { font-size: 32px; margin-bottom: 12px; }
 
@@ -451,6 +457,23 @@ function renderConversation(totalSize) {
 }
 
 function renderMessage(msg, index) {
+  if (msg.is_compact_boundary) {
+    const meta = msg.compact_meta || {};
+    const trigger = meta.trigger || '?';
+    const preTokens = meta.preTokens ? `${(meta.preTokens / 1000).toFixed(0)}k tokens` : '';
+    const ts = formatDate(msg.timestamp);
+    return `
+      <div class="compact-boundary" id="msg-${index}" data-uuid="${msg.uuid || ''}" data-index="${index}">
+        <div class="compact-line"></div>
+        <div class="compact-label">
+          ⚡ Compaction
+          <span class="compact-tokens">${trigger}${preTokens ? ' · ' + preTokens : ''}${ts ? ' · ' + ts : ''}</span>
+        </div>
+        <div class="compact-line"></div>
+      </div>
+    `;
+  }
+
   const isDeleted = deletedUuids.has(msg.uuid);
   const isSide = msg.isSidechain;
   const cs = msg.content_summary;
@@ -581,7 +604,10 @@ function truncateFrom(index) {
 
 function selectAll(checked) {
   pushUndo();
-  allMessages.forEach((_, i) => setMessageChecked(i, checked));
+  allMessages.forEach((msg, i) => {
+    if (msg.is_compact_boundary) return;
+    setMessageChecked(i, checked);
+  });
   updateSizeInfo();
   updateButtons();
 }
@@ -1092,6 +1118,9 @@ async function restoreSidechain(index) {
 
 function computeWasteScore(msg) {
   // Returns score: -1 (productive) → 0 (neutral) → +1 (wasteful)
+  if (msg.is_compact_boundary) {
+    return { score: 0, label: 'compaction', size: 0, isCompaction: true };
+  }
   const cs = msg.content_summary;
   const types = cs?.types || [];
   const raw = msg.raw?.message?.content;
@@ -1143,6 +1172,9 @@ function renderHeatmap() {
 
   container.innerHTML = allMessages.map((msg, i) => {
     const w = computeWasteScore(msg);
+    if (w.isCompaction) {
+      return `<div class="conv-heatmap-cell" data-idx="${i}" style="background:#d29922;min-width:3px;max-width:3px"><span class="tooltip">⚡ Compaction</span></div>`;
+    }
     const color = wasteColor(w.score);
     const deleted = deletedUuids.has(msg.uuid);
     const opacity = deleted ? 0.2 : 1;
@@ -1328,7 +1360,7 @@ async function initFromHash() {
 }
 
 function waitForWails(cb) {
-  if (window.go?.main?.App) { cb(); return; }
+  if (window.go?.main?.App || window.go?.main?.NotifyApp) { cb(); return; }
   setTimeout(() => waitForWails(cb), 50);
 }
 async function checkUpdate() {
@@ -1352,6 +1384,58 @@ async function doUpdate(url) {
 }
 
 waitForWails(async () => {
+  // Notify popup mode
+  if (window.go?.main?.NotifyApp) {
+    const notify = window.go.main.NotifyApp;
+    const data = await notify.GetNotification();
+    document.body.innerHTML = '';
+    document.body.style.cssText = 'font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0d1117;color:#e6edf3;padding:24px;display:flex;flex-direction:column;height:100vh;';
+    const title = document.createElement('h2');
+    title.textContent = data.title;
+    title.style.cssText = 'color:#58a6ff;margin-bottom:16px;font-size:16px;';
+
+    // Extract session ID from message
+    const sessionMatch = data.message.match(/\/resume\s+(\S+)/);
+    const sessionId = sessionMatch ? sessionMatch[1] : null;
+
+    // Remove "Resume command:" lines from the report body
+    const reportText = data.message.replace(/\nResume command:\n\/resume\s+\S+/g, '');
+
+    const pre = document.createElement('pre');
+    pre.textContent = reportText;
+    pre.style.cssText = 'flex:1;overflow:auto;font-size:13px;line-height:1.6;white-space:pre-wrap;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;';
+
+    document.body.appendChild(title);
+
+    // Resume commands at top level
+    if (sessionId) {
+      const cmdsDiv = document.createElement('div');
+      cmdsDiv.style.cssText = 'margin-bottom:12px;display:flex;flex-direction:column;gap:8px;';
+      const cmds = [
+        { label: '/resume ' + sessionId, value: '/resume ' + sessionId },
+        { label: 'claude --resume ' + sessionId, value: 'claude --resume ' + sessionId },
+      ];
+      for (const cmd of cmds) {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;';
+        const code = document.createElement('code');
+        code.textContent = cmd.label;
+        code.style.cssText = 'flex:1;font-size:13px;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:8px 12px;color:#58a6ff;';
+        const btn = document.createElement('button');
+        btn.textContent = 'Copy';
+        btn.style.cssText = 'padding:6px 14px;background:#238636;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap;';
+        btn.onclick = () => { navigator.clipboard.writeText(cmd.value); btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy', 1500); };
+        row.appendChild(code);
+        row.appendChild(btn);
+        cmdsDiv.appendChild(row);
+      }
+      document.body.appendChild(cmdsDiv);
+    }
+
+    document.body.appendChild(pre);
+    return;
+  }
+
   Object.assign(go, window.go.main.App);
   const args = await go.GetStartupArgs();
   if (args.project && args.session) {

@@ -1,19 +1,14 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 type App struct {
@@ -72,20 +67,22 @@ type ContentSummary struct {
 }
 
 type Message struct {
-	UUID           string          `json:"uuid"`
-	ParentUUID     string          `json:"parentUuid"`
-	Type           string          `json:"type"`
-	Role           string          `json:"role"`
-	Timestamp      string          `json:"timestamp"`
-	IsSidechain    bool            `json:"isSidechain"`
-	ContentSummary ContentSummary  `json:"content_summary"`
-	IsToolOnly     bool            `json:"is_tool_only"`
-	IsSystem       bool            `json:"is_system"`
-	Model          string          `json:"model"`
-	Raw            json.RawMessage `json:"raw"`
+	UUID              string           `json:"uuid"`
+	ParentUUID        string           `json:"parentUuid"`
+	Type              string           `json:"type"`
+	Role              string           `json:"role"`
+	Timestamp         string           `json:"timestamp"`
+	IsSidechain       bool             `json:"isSidechain"`
+	ContentSummary    ContentSummary   `json:"content_summary"`
+	IsToolOnly        bool             `json:"is_tool_only"`
+	IsSystem          bool             `json:"is_system"`
+	IsCompactBoundary bool             `json:"is_compact_boundary"`
+	CompactMeta       *CompactMetadata `json:"compact_meta,omitempty"`
+	Model             string           `json:"model"`
+	Raw               json.RawMessage  `json:"raw"`
 }
 
-type Conversation struct {
+type ConversationView struct {
 	Messages  []Message `json:"messages"`
 	TotalSize int64     `json:"total_size"`
 	SessionID string    `json:"session_id"`
@@ -235,7 +232,7 @@ func (a *App) ListSessions(projectID string) ([]Session, error) {
 	return sessions, nil
 }
 
-func (a *App) GetConversation(projectID, sessionID string) (*Conversation, error) {
+func (a *App) GetConversation(projectID, sessionID string) (*ConversationView, error) {
 	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
 	info, err := os.Stat(path)
 	if err != nil {
@@ -248,6 +245,20 @@ func (a *App) GetConversation(projectID, sessionID string) (*Conversation, error
 
 	var messages []Message
 	for _, e := range entries {
+		if e.IsCompactBoundary() {
+			raw, _ := e.Marshal()
+			messages = append(messages, Message{
+				UUID:              e.UUID,
+				ParentUUID:        e.GetParentUUID(),
+				Type:              e.Type,
+				Role:              "system",
+				Timestamp:         e.Timestamp,
+				IsCompactBoundary: true,
+				CompactMeta:       e.CompactMeta,
+				Raw:               raw,
+			})
+			continue
+		}
 		if !e.IsMessage() {
 			continue
 		}
@@ -292,12 +303,12 @@ func (a *App) GetConversation(projectID, sessionID string) (*Conversation, error
 			Raw:            raw,
 		})
 	}
-	return &Conversation{Messages: messages, TotalSize: info.Size(), SessionID: sessionID}, nil
+	return &ConversationView{Messages: messages, TotalSize: info.Size(), SessionID: sessionID}, nil
 }
 
 func (a *App) SaveConversation(projectID, sessionID string, req SaveRequest) (*SaveResult, error) {
 	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
-	entries, err := ReadJSONLFile(path)
+	conv, err := LoadConversation(path)
 	if err != nil {
 		return nil, fmt.Errorf("session not found: %s", sessionID)
 	}
@@ -307,107 +318,43 @@ func (a *App) SaveConversation(projectID, sessionID string, req SaveRequest) (*S
 		keepSet[u] = true
 	}
 
-	uuidToParent := map[string]string{}
-	for _, e := range entries {
-		if e.UUID != "" {
-			uuidToParent[e.UUID] = e.GetParentUUID()
-		}
-	}
-
-	// Build the set of all UUIDs that will survive in the output
-	survivingUUIDs := make(map[string]bool)
-	for k := range keepSet {
-		survivingUUIDs[k] = true
-	}
-	for _, e := range entries {
-		if !e.IsMessage() && e.UUID != "" {
-			survivingUUIDs[e.UUID] = true
-		}
-	}
-
-	findSurvivingAncestor := func(uuid string) string {
-		visited := map[string]bool{}
-		cur := uuid
-		for cur != "" && !visited[cur] {
-			visited[cur] = true
-			if survivingUUIDs[cur] {
-				return cur
-			}
-			cur = uuidToParent[cur]
-		}
-		return ""
-	}
-
-	// Build deleted set for insert-gap detection
-	deletedSet := make(map[string]bool)
-	for _, u := range req.DeletedUUIDs {
-		deletedSet[u] = true
-	}
-
-	// Parse inserted lines as entries and find last insert UUID
+	// Parse inserted lines as entries
 	var insertEntries []*JSONLEntry
-	var lastInsertUUID string
 	for _, il := range req.InsertLines {
 		ie, err := ParseEntry([]byte(il))
 		if err == nil {
 			insertEntries = append(insertEntries, ie)
-			lastInsertUUID = ie.UUID
-			survivingUUIDs[ie.UUID] = true
 		}
 	}
 
-	// Helper to fix parentUuid if needed
-	fixParentUuid := func(e *JSONLEntry) {
-		parent := e.GetParentUUID()
-		if parent == "" || survivingUUIDs[parent] {
-			return
-		}
-		if deletedSet[parent] && lastInsertUUID != "" {
-			e.SetParentUUID(lastInsertUUID)
-			return
-		}
-		ancestor := findSurvivingAncestor(parent)
-		if ancestor == "" {
-			e.ParentUUID = nil
-		} else {
-			e.SetParentUUID(ancestor)
-		}
-	}
-
-	var output []*JSONLEntry
+	// Build output: keep non-messages + kept messages, insert at first deletion gap
+	var result []*JSONLEntry
 	insertedAtGap := false
-	for _, e := range entries {
+	for _, e := range conv.Entries {
 		if !e.IsMessage() {
-			fixParentUuid(e)
-			output = append(output, e)
+			result = append(result, e)
 			continue
 		}
 		if !keepSet[e.UUID] {
 			if !insertedAtGap && len(insertEntries) > 0 {
-				output = append(output, insertEntries...)
+				result = append(result, insertEntries...)
 				insertedAtGap = true
 			}
 			continue
 		}
-		fixParentUuid(e)
-		output = append(output, e)
+		result = append(result, e)
 	}
+	conv.Entries = result
 
-	backup := path + ".bak"
-	src, _ := os.Open(path)
-	dst, _ := os.Create(backup)
-	io.Copy(dst, src)
-	src.Close()
-	dst.Close()
-
-	if err := WriteJSONLFile(path, output); err != nil {
+	backup, err := conv.SaveWithBackup(path)
+	if err != nil {
 		return nil, err
 	}
 
 	newInfo, _ := os.Stat(path)
 	return &SaveResult{
 		Success:   true,
-		KeptLines: len(output),
+		KeptLines: conv.EntryCount(),
 		NewSize:   newInfo.Size(),
 		Backup:    backup,
 	}, nil
@@ -416,234 +363,84 @@ func (a *App) SaveConversation(projectID, sessionID string, req SaveRequest) (*S
 // EditMessage updates the text content of a specific message.
 func (a *App) EditMessage(projectID, sessionID, uuid, newText string) error {
 	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
-	entries, err := ReadJSONLFile(path)
+	conv, err := LoadConversation(path)
 	if err != nil {
 		return err
 	}
 
-	for _, e := range entries {
-		if e.UUID != uuid {
-			continue
-		}
-		if e.Message == nil {
-			continue
-		}
-
-		// Update content: replace text block(s) with newText
-		content := e.Message.Content
-		var s string
-		if json.Unmarshal(content, &s) == nil {
-			// String content: replace directly
-			e.Message.Content, _ = json.Marshal(newText)
-		} else {
-			var arr []json.RawMessage
-			if json.Unmarshal(content, &arr) == nil {
-				first := true
-				for i, item := range arr {
-					var block map[string]json.RawMessage
-					if json.Unmarshal(item, &block) != nil {
-						continue
-					}
-					var t string
-					json.Unmarshal(block["type"], &t)
-					if t == "text" {
-						if first {
-							block["text"], _ = json.Marshal(newText)
-							first = false
-						} else {
-							block["text"] = json.RawMessage(`""`)
-						}
-						arr[i], _ = json.Marshal(block)
-					}
-				}
-				e.Message.Content, _ = json.Marshal(arr)
-			}
-		}
-		break
+	e := conv.FindByUUID(uuid)
+	if e == nil || e.Message == nil {
+		return fmt.Errorf("message not found: %s", uuid)
 	}
 
-	return WriteJSONLFile(path, entries)
+	content := e.Message.Content
+	var s string
+	if json.Unmarshal(content, &s) == nil {
+		e.Message.Content, _ = json.Marshal(newText)
+	} else {
+		var arr []json.RawMessage
+		if json.Unmarshal(content, &arr) == nil {
+			first := true
+			for i, item := range arr {
+				var block map[string]json.RawMessage
+				if json.Unmarshal(item, &block) != nil {
+					continue
+				}
+				var t string
+				json.Unmarshal(block["type"], &t)
+				if t == "text" {
+					if first {
+						block["text"], _ = json.Marshal(newText)
+						first = false
+					} else {
+						block["text"] = json.RawMessage(`""`)
+					}
+					arr[i], _ = json.Marshal(block)
+				}
+			}
+			e.Message.Content, _ = json.Marshal(arr)
+		}
+	}
+
+	return conv.WriteToFile(path)
 }
 
-// setSidechainFrom sets isSidechain on all descendants of fromUUID (exclusive).
+// setSidechainFrom sets isSidechain on all entries after fromUUID.
 // If toSidechain=true, marks them as sidechain; false restores to main.
 func (a *App) setSidechainFrom(projectID, sessionID, fromUUID string, toSidechain bool) error {
 	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
-	entries, err := ReadJSONLFile(path)
+	conv, err := LoadConversation(path)
 	if err != nil {
 		return err
 	}
 
-	uuidToParent := map[string]string{}
-	for _, e := range entries {
-		if e.UUID != "" {
-			uuidToParent[e.UUID] = e.GetParentUUID()
+	// In a linear conversation, "descendants" = everything after fromUUID
+	found := false
+	for _, e := range conv.Entries {
+		if e.UUID == fromUUID {
+			found = true
+			continue
 		}
-	}
-
-	// Find all descendants (messages whose ancestor chain passes through fromUUID)
-	isDescendant := map[string]bool{}
-	for uuid := range uuidToParent {
-		cur := uuid
-		for cur != "" {
-			if cur == fromUUID {
-				isDescendant[uuid] = true
-				break
-			}
-			cur = uuidToParent[cur]
-		}
-	}
-
-	for _, e := range entries {
-		if e.UUID != "" && isDescendant[e.UUID] {
+		if found && e.UUID != "" {
 			e.IsSidechain = toSidechain
 		}
 	}
 
-	return WriteJSONLFile(path, entries)
-}
-
-func projectIDToPath(id string) string {
-	return "/" + strings.ReplaceAll(strings.TrimPrefix(id, "-"), "-", "/")
-}
-
-// BuildClaudeCommand returns the shell command string for launching claude.
-func BuildClaudeCommand(projectID, sessionID string, skipPermissions bool) string {
-	dir := projectIDToPath(projectID)
-	claudeCmd := "claude"
-	if skipPermissions {
-		claudeCmd = "claude --dangerously-skip-permissions"
-	}
-	if sessionID != "" {
-		claudeCmd += " --resume " + sessionID
-	}
-	return fmt.Sprintf("cd %s && %s", dir, claudeCmd)
-}
-
-// GetClaudeCommand returns the command string so the frontend can display/copy it.
-func (a *App) GetClaudeCommand(projectID, sessionID string, skipPermissions bool) string {
-	return BuildClaudeCommand(projectID, sessionID, skipPermissions)
-}
-
-type terminalLauncher func(script string) error
-
-var terminalLaunchers = map[string]terminalLauncher{
-	"Terminal": func(script string) error {
-		return exec.Command("osascript",
-			"-e", `tell application "Terminal" to activate`,
-			"-e", fmt.Sprintf(`tell application "Terminal" to do script %q`, script),
-		).Run()
-	},
-	"iTerm2": func(script string) error {
-		apple := fmt.Sprintf(`tell application "iTerm"
-	activate
-	set newWindow to (create window with default profile)
-	tell current session of newWindow
-		write text %q
-	end tell
-end tell`, script)
-		return exec.Command("osascript", "-e", apple).Run()
-	},
-	"Ghostty": func(script string) error {
-		return exec.Command("open", "-na", "Ghostty", "--args", "-e", "sh", "-c", script).Run()
-	},
-	"Alacritty": func(script string) error {
-		return exec.Command("alacritty", "-e", "sh", "-c", script).Start()
-	},
-	"Kitty": func(script string) error {
-		return exec.Command("kitty", "sh", "-c", script).Start()
-	},
-	"WezTerm": func(script string) error {
-		return exec.Command("wezterm", "start", "--", "sh", "-c", script).Start()
-	},
-}
-
-// GetAvailableTerminals returns terminal names that are installed.
-func (a *App) GetAvailableTerminals() []string {
-	// app bundles to check in /Applications
-	appBundles := map[string]string{
-		"iTerm2":    "iTerm.app",
-		"Ghostty":   "Ghostty.app",
-		"Alacritty": "Alacritty.app",
-		"Kitty":     "kitty.app",
-		"WezTerm":   "WezTerm.app",
-	}
-	// CLI commands to check in PATH
-	cliNames := map[string]string{
-		"Ghostty":   "ghostty",
-		"Alacritty": "alacritty",
-		"Kitty":     "kitty",
-		"WezTerm":   "wezterm",
-	}
-
-	available := []string{"Terminal"} // Terminal.app is always available on macOS
-	seen := map[string]bool{"Terminal": true}
-
-	for name, bundle := range appBundles {
-		if seen[name] {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join("/Applications", bundle)); err == nil {
-			available = append(available, name)
-			seen[name] = true
-		}
-	}
-	for name, cli := range cliNames {
-		if seen[name] {
-			continue
-		}
-		if _, err := exec.LookPath(cli); err == nil {
-			available = append(available, name)
-			seen[name] = true
-		}
-	}
-	sort.Strings(available)
-	return available
-}
-
-func (a *App) ExecClaude(projectID string, sessionID string, skipPermissions bool, terminal string) error {
-	script := BuildClaudeCommand(projectID, sessionID, skipPermissions)
-	launcher, ok := terminalLaunchers[terminal]
-	if !ok {
-		launcher = terminalLaunchers["Terminal"]
-	}
-	return launcher(script)
+	return conv.WriteToFile(path)
 }
 
 // InsertMessage inserts a new message immediately after afterUUID.
-// The message after afterUUID gets its parentUuid updated to the new message.
 func (a *App) InsertMessage(projectID, sessionID, afterUUID, role, text string) error {
 	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
-	entries, err := ReadJSONLFile(path)
+	conv, err := LoadConversation(path)
 	if err != nil {
 		return err
 	}
 
-	newUUID := generateUUID()
-	newEntry := NewEntry(newUUID, afterUUID, role, sessionID, NewMessageContent(role, text))
+	newEntry := conv.NewEntry(role, role, text)
+	conv.InsertAfter(afterUUID, newEntry)
 
-	// Insert after afterUUID
-	var out []*JSONLEntry
-	for _, e := range entries {
-		out = append(out, e)
-		if e.UUID == afterUUID {
-			out = append(out, newEntry)
-		}
-	}
-
-	// Update first child whose parentUuid == afterUUID to point to newUUID
-	updatedChild := false
-	for _, e := range out {
-		if e.UUID == newUUID {
-			continue
-		}
-		if e.GetParentUUID() == afterUUID && !updatedChild {
-			e.SetParentUUID(newUUID)
-			updatedChild = true
-		}
-	}
-
-	return WriteJSONLFile(path, out)
+	return conv.WriteToFile(path)
 }
 
 func (a *App) BranchFrom(projectID, sessionID, fromUUID string) error {
@@ -658,23 +455,16 @@ func (a *App) RestoreSidechain(projectID, sessionID, fromUUID string) error {
 // Returns the new session ID.
 func (a *App) BranchNewSession(projectID, sessionID, fromUUID string) (string, error) {
 	srcPath := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
-	entries, err := ReadJSONLFile(srcPath)
+	conv, err := LoadConversation(srcPath)
 	if err != nil {
 		return "", err
 	}
 
-	// Keep entries up to and including fromUUID
-	var kept []*JSONLEntry
-	for _, e := range entries {
-		kept = append(kept, e)
-		if e.UUID == fromUUID {
-			break
-		}
-	}
+	conv.TruncateAfter(fromUUID)
 
 	newID := generateUUID()
 	dstPath := filepath.Join(claudeDir(), projectID, newID+".jsonl")
-	if err := WriteJSONLFile(dstPath, kept); err != nil {
+	if err := conv.WriteToFile(dstPath); err != nil {
 		return "", err
 	}
 	return newID, nil
@@ -695,7 +485,7 @@ func selectEntries(entries []*JSONLEntry, uuidSet map[string]bool) []*JSONLEntry
 // SummarizeMessages calls `claude -p` to summarize the selected messages.
 func (a *App) SummarizeMessages(projectID, sessionID string, uuids []string) (string, error) {
 	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
-	entries, err := ReadJSONLFile(path)
+	conv, err := LoadConversation(path)
 	if err != nil {
 		return "", err
 	}
@@ -703,7 +493,7 @@ func (a *App) SummarizeMessages(projectID, sessionID string, uuids []string) (st
 	for _, u := range uuids {
 		uuidSet[u] = true
 	}
-	selected := selectEntries(entries, uuidSet)
+	selected := selectEntries(conv.Entries, uuidSet)
 	if len(selected) == 0 {
 		return "", fmt.Errorf("no selected messages found")
 	}
@@ -734,34 +524,12 @@ func (a *App) SummarizeMessages(projectID, sessionID string, uuids []string) (st
 	return strings.TrimSpace(out), nil
 }
 
-const idealizeSystemPrompt = `You are an expert at cleaning up Claude Code conversation histories for context engineering.
-
-You have two modes. Choose the best one for the situation:
-
-MODE "actions" — Per-message triage. For each message, decide:
-- "delete": errors, failed attempts, retries, unnecessary detours, verbose outputs that add no value
-- "keep": essential context, correct approaches, important decisions
-- "edit": messages worth keeping but with wasted content (trim unnecessary parts, fix errors). Provide the cleaned text in edited_content.
-Use this mode when most messages can be kept as-is or simply deleted.
-
-MODE "rewrite" — Full rewrite. Output a new sequence of messages (role + content) that replaces the entire selection.
-Use this mode when the conversation is too messy for per-message triage and needs a clean rewrite.
-
-Be aggressive about deleting waste. Preserve the minimum context needed to understand what happened and continue the work.`
-
-// buildIdealizeSchema generates a JSON schema with mode field to choose actions or rewrite.
-func buildIdealizeSchema(uuids []string) string {
-	uuidEnum, _ := json.Marshal(uuids)
-	return fmt.Sprintf(`{"type":"object","properties":{"mode":{"type":"string","enum":["actions","rewrite"]},"actions":{"type":"array","items":{"type":"object","properties":{"uuid":{"type":"string","enum":%s},"action":{"type":"string","enum":["delete","keep","edit"]},"edited_content":{"type":"string"}},"required":["uuid","action"]}},"messages":{"type":"array","items":{"type":"object","properties":{"role":{"type":"string","enum":["user","assistant"]},"content":{"type":"string"}},"required":["role","content"]}}},"required":["mode"]}`,
-		string(uuidEnum))
-}
-
 // IdealizeMessages analyzes selected messages and returns either:
 // - {"mode":"actions","actions":[{uuid,action,edited_content}]} for per-message triage
 // - {"mode":"rewrite","messages":[{role,content}]} for full rewrite
 func (a *App) IdealizeMessages(projectID, sessionID string, uuids []string) (string, error) {
 	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
-	entries, err := ReadJSONLFile(path)
+	conv, err := LoadConversation(path)
 	if err != nil {
 		return "", err
 	}
@@ -776,7 +544,7 @@ func (a *App) IdealizeMessages(projectID, sessionID string, uuids []string) (str
 		Content json.RawMessage `json:"content"`
 	}
 	var labeled []msgWithUUID
-	for _, e := range selectEntries(entries, uuidSet) {
+	for _, e := range selectEntries(conv.Entries, uuidSet) {
 		role := e.Type
 		var content json.RawMessage
 		if e.Message != nil {
@@ -814,7 +582,7 @@ func (a *App) ApplyIdealized(projectID, sessionID string, uuids []string, messag
 	}
 
 	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
-	entries, err := ReadJSONLFile(path)
+	conv, err := LoadConversation(path)
 	if err != nil {
 		return "", err
 	}
@@ -824,264 +592,79 @@ func (a *App) ApplyIdealized(projectID, sessionID string, uuids []string, messag
 		uuidSet[u] = true
 	}
 
-	// Find parentUuid of first selected message
-	var firstParentUUID string
-	for _, e := range entries {
-		if uuidSet[e.UUID] {
-			firstParentUUID = e.GetParentUUID()
-			break
-		}
-	}
-
 	// Build new entries for idealized messages
 	var newEntries []*JSONLEntry
-	prevUUID := firstParentUUID
 	for _, im := range idealMsgs {
-		e := NewEntry(generateUUID(), prevUUID, im.Role, sessionID,
-			NewMessageContentBlocks(im.Role, im.Content))
+		e := conv.NewEntryWithBlocks(im.Role, NewMessageContentBlocks(im.Role, im.Content))
 		newEntries = append(newEntries, e)
-		prevUUID = e.UUID
 	}
-	lastIdealUUID := prevUUID
 
-	// Build output: pre-selection + idealized + post-selection
-	var output []*JSONLEntry
-	inSelection := false
-	passedSelection := false
-	firstPostFixed := false
-	for _, e := range entries {
-		if uuidSet[e.UUID] {
-			if !inSelection {
-				inSelection = true
-				output = append(output, newEntries...)
-			}
-			passedSelection = true
-			continue
-		}
-		if passedSelection && !firstPostFixed {
-			if uuidSet[e.GetParentUUID()] {
-				e.SetParentUUID(lastIdealUUID)
-				firstPostFixed = true
-			}
-		}
-		output = append(output, e)
-	}
-	_ = inSelection
+	conv.ReplaceRange(uuidSet, newEntries)
 
 	newID := generateUUID()
 	dstPath := filepath.Join(claudeDir(), projectID, newID+".jsonl")
-	if err := WriteJSONLFile(dstPath, output); err != nil {
+	if err := conv.WriteToFile(dstPath); err != nil {
 		return "", err
 	}
 	return newID, nil
 }
 
-func extractText(content json.RawMessage) string {
-	var s string
-	if json.Unmarshal(content, &s) == nil {
-		return strings.TrimSpace(s)
-	}
-	var arr []json.RawMessage
-	if json.Unmarshal(content, &arr) != nil {
-		return ""
-	}
-	var texts []string
-	for _, item := range arr {
-		var block map[string]json.RawMessage
-		if json.Unmarshal(item, &block) != nil {
-			continue
-		}
-		var t string
-		json.Unmarshal(block["type"], &t)
-		switch t {
-		case "text":
-			var text string
-			json.Unmarshal(block["text"], &text)
-			if text != "" {
-				texts = append(texts, text)
-			}
-		case "tool_use":
-			var name string
-			json.Unmarshal(block["name"], &name)
-			input, _ := json.Marshal(block["input"])
-			texts = append(texts, fmt.Sprintf("[tool_use: %s %s]", name, string(input)))
-		case "tool_result":
-			var resultText string
-			// content may be array or string
-			var sub []json.RawMessage
-			if json.Unmarshal(block["content"], &sub) == nil {
-				for _, s := range sub {
-					var sb map[string]json.RawMessage
-					json.Unmarshal(s, &sb)
-					var tx string
-					json.Unmarshal(sb["text"], &tx)
-					resultText += tx
-				}
-			} else {
-				json.Unmarshal(block["content"], &resultText)
-			}
-			if len(resultText) > 500 {
-				resultText = resultText[:500] + "…"
-			}
-			texts = append(texts, fmt.Sprintf("[tool_result: %s]", resultText))
-		case "thinking":
-			// skip thinking blocks
-		}
-	}
-	return strings.Join(texts, "\n")
-}
-
-const summarizeSystemPrompt = `You are a conversation summarizer. Output only a concise summary of the conversation provided. Do not use any tools. Do not ask questions. Output the summary text directly with no preamble.`
-
-// runClaude calls claude -p with --output-format json.
-// If jsonSchema is non-empty, --json-schema is passed; systemPrompt overrides the default.
-func runClaude(prompt, jsonSchema string) (string, error) {
-	return runClaudeWithSystem(prompt, jsonSchema, "")
-}
-
-// runClaudeStreaming streams output tokens via Wails events and returns the final result.
-func runClaudeStreaming(ctx context.Context, prompt, jsonSchema, systemPrompt string) (string, error) {
-	args := []string{"-p", "--output-format", "stream-json", "--verbose", "--effort", "low", "--model", "claude-sonnet-4-6", "--max-turns", "1"}
-	if jsonSchema != "" {
-		args = append(args, "--json-schema", jsonSchema)
-	}
-	sp := systemPrompt
-	if sp == "" {
-		sp = summarizeSystemPrompt
-	}
-	args = append(args, "--system-prompt", sp, prompt)
-
-	cmd := exec.Command("claude", args...)
-	stdout, err := cmd.StdoutPipe()
+// FastCompact runs rule-based compaction on a session and returns a report.
+// If dryRun is true, no changes are written.
+func (a *App) FastCompact(projectID, sessionID string, ruleNames []string, dryRun bool) (*CompactReport, error) {
+	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
+	conv, err := LoadConversation(path)
 	if err != nil {
-		return "", err
-	}
-	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
-	if err := cmd.Start(); err != nil {
-		return "", err
+		return nil, fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	var finalResult string
-	var allLines []string
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		allLines = append(allLines, line)
-		var event map[string]json.RawMessage
-		if json.Unmarshal([]byte(line), &event) != nil {
-			continue
-		}
-		var evType string
-		json.Unmarshal(event["type"], &evType)
+	rules := selectRules(ruleNames)
+	report := RunCompaction(conv, rules)
 
-		switch evType {
-		case "assistant":
-			if ctx != nil {
-				runtime.EventsEmit(ctx, "claude:stream", line)
-			}
-		case "result":
-			// structured_output has the JSON schema result; result is plain text
-			if so, ok := event["structured_output"]; ok && string(so) != "null" {
-				finalResult = string(so)
-			} else {
-				raw := event["result"]
-				var s string
-				if json.Unmarshal(raw, &s) == nil {
-					finalResult = s
-				} else {
-					finalResult = string(raw)
-				}
-			}
+	if !dryRun {
+		if _, err := conv.SaveWithBackup(path); err != nil {
+			return nil, err
 		}
 	}
 
-	if err := cmd.Wait(); err != nil {
-		if se := strings.TrimSpace(stderrBuf.String()); se != "" {
-			return "", fmt.Errorf("%s", se)
-		}
-		return "", err
-	}
-	if finalResult == "" && len(allLines) > 0 {
-		return "", fmt.Errorf("no result event found. last lines: %s", allLines[len(allLines)-1])
-	}
-	return strings.TrimSpace(finalResult), nil
+	return &report, nil
 }
 
-func runClaudeWithSystem(prompt, jsonSchema, systemPrompt string) (string, error) {
-	args := []string{"-p", "--output-format", "json", "--effort", "low", "--model", "claude-sonnet-4-6", "--max-turns", "3", "--tools", ""}
-	if jsonSchema != "" {
-		args = append(args, "--json-schema", jsonSchema)
-	}
-	sp := systemPrompt
-	if sp == "" {
-		sp = summarizeSystemPrompt
-	}
-	args = append(args, "--system-prompt", sp, prompt)
-
-	cmd := exec.Command("claude", args...)
-	out, err := cmd.Output()
+// ValidateSession checks a session for chain and tool pairing issues.
+func (a *App) ValidateSession(projectID, sessionID string) ([]ChainIssue, error) {
+	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
+	conv, err := LoadConversation(path)
 	if err != nil {
-		// If we got output despite error (e.g. error_max_turns), try to parse it
-		if ee, ok := err.(*exec.ExitError); ok {
-			combined := out
-			if len(combined) == 0 {
-				combined = ee.Stderr
-			}
-			if len(combined) > 0 {
-				// Try parsing as JSON - may contain structured_output despite exit error
-				var envelope map[string]json.RawMessage
-				if json.Unmarshal(combined, &envelope) == nil {
-					if so, ok := envelope["structured_output"]; ok && string(so) != "null" {
-						return string(so), nil
-					}
-					if r, ok := envelope["result"]; ok {
-						var s string
-						if json.Unmarshal(r, &s) == nil && s != "" {
-							return strings.TrimSpace(s), nil
-						}
-					}
-				}
-				return "", fmt.Errorf("%s", strings.TrimSpace(string(combined)))
-			}
-		}
-		return "", err
+		return nil, err
+	}
+	return conv.ValidateChain(), nil
+}
+
+// FixSession repairs chain issues and tool pairing problems in a session.
+func (a *App) FixSession(projectID, sessionID string) (*CompactReport, error) {
+	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
+	conv, err := LoadConversation(path)
+	if err != nil {
+		return nil, err
 	}
 
-	// Parse JSON envelope
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(out, &envelope); err != nil {
-		return strings.TrimSpace(string(out)), nil
+	rules := []CompactRule{
+		&RepairToolPairsRule{},
+		&FillMissingToolResultsRule{},
+		&MergeConsecutiveRule{},
 	}
-	if errField, ok := envelope["error"]; ok {
-		var e string
-		json.Unmarshal(errField, &e)
-		if e != "" {
-			return "", fmt.Errorf("%s", e)
-		}
+	report := RunCompaction(conv, rules)
+
+	if _, err := conv.SaveWithBackup(path); err != nil {
+		return nil, err
 	}
-	// structured_output takes priority (for --json-schema)
-	if so, ok := envelope["structured_output"]; ok && string(so) != "null" {
-		return string(so), nil
-	}
-	var result string
-	if r, ok := envelope["result"]; ok {
-		if json.Unmarshal(r, &result) == nil {
-			return strings.TrimSpace(result), nil
-		}
-		return string(r), nil
-	}
-	return strings.TrimSpace(string(out)), nil
+	return &report, nil
 }
 
 // ApplySummary replaces the selected messages with a single summary user message.
 func (a *App) ApplySummary(projectID, sessionID string, uuids []string, summary string) error {
 	path := filepath.Join(claudeDir(), projectID, sessionID+".jsonl")
-	entries, err := ReadJSONLFile(path)
+	conv, err := LoadConversation(path)
 	if err != nil {
 		return err
 	}
@@ -1091,40 +674,10 @@ func (a *App) ApplySummary(projectID, sessionID string, uuids []string, summary 
 		uuidSet[u] = true
 	}
 
-	// Find parentUuid of first selected message
-	var firstParentUUID string
-	found := false
-	for _, e := range entries {
-		if uuidSet[e.UUID] {
-			firstParentUUID = e.GetParentUUID()
-			found = true
-			break
-		}
-	}
-	if !found {
-		return fmt.Errorf("selected messages not found")
-	}
-
-	summaryEntry := NewEntry(generateUUID(), firstParentUUID, "user", sessionID,
-		NewMessageContent("user", "[Summary]\n"+summary))
+	summaryEntry := conv.NewEntry("user", "user", "[Summary]\n"+summary)
 	summaryEntry.IsSummary = true
 
-	// Build output: replace selected block with summary, fix parentUuid references
-	var output []*JSONLEntry
-	inserted := false
-	for _, e := range entries {
-		if uuidSet[e.UUID] {
-			if !inserted {
-				output = append(output, summaryEntry)
-				inserted = true
-			}
-			continue
-		}
-		if uuidSet[e.GetParentUUID()] {
-			e.SetParentUUID(summaryEntry.UUID)
-		}
-		output = append(output, e)
-	}
+	conv.ReplaceRange(uuidSet, []*JSONLEntry{summaryEntry})
 
-	return WriteJSONLFile(path, output)
+	return conv.WriteToFile(path)
 }

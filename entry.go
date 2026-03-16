@@ -17,18 +17,27 @@ func generateUUID() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// CompactMetadata holds metadata about a compaction event.
+type CompactMetadata struct {
+	Trigger   string `json:"trigger"`
+	PreTokens int    `json:"preTokens"`
+}
+
 // JSONLEntry represents a single line in a Claude Code JSONL session file.
 // It preserves all fields for round-tripping, even unknown ones.
 type JSONLEntry struct {
 	// Known fields (typed accessors)
-	UUID        string          `json:"-"`
-	ParentUUID  *string         `json:"-"` // nil = null
-	Type        string          `json:"-"`
-	Timestamp   string          `json:"-"`
-	SessionID   string          `json:"-"`
-	IsSidechain bool            `json:"-"`
-	IsSummary   bool            `json:"-"`
-	Message     *EntryMessage   `json:"-"`
+	UUID              string           `json:"-"`
+	ParentUUID        *string          `json:"-"` // nil = null
+	Type              string           `json:"-"`
+	Subtype           string           `json:"-"`
+	Timestamp         string           `json:"-"`
+	SessionID         string           `json:"-"`
+	IsSidechain       bool             `json:"-"`
+	IsSummary         bool             `json:"-"`
+	LogicalParentUUID *string          `json:"-"` // non-nil on compact_boundary
+	CompactMeta       *CompactMetadata `json:"-"` // non-nil on compact_boundary
+	Message           *EntryMessage    `json:"-"`
 
 	// Raw stores ALL fields including the known ones, for round-tripping
 	raw map[string]json.RawMessage
@@ -72,8 +81,24 @@ func ParseEntry(data []byte) (*JSONLEntry, error) {
 	if v, ok := e.raw["isSidechain"]; ok {
 		json.Unmarshal(v, &e.IsSidechain)
 	}
+	if v, ok := e.raw["subtype"]; ok {
+		json.Unmarshal(v, &e.Subtype)
+	}
 	if v, ok := e.raw["isSummary"]; ok {
 		json.Unmarshal(v, &e.IsSummary)
+	}
+	if v, ok := e.raw["logicalParentUuid"]; ok {
+		if string(v) != "null" {
+			var s string
+			json.Unmarshal(v, &s)
+			e.LogicalParentUUID = &s
+		}
+	}
+	if v, ok := e.raw["compactMetadata"]; ok {
+		var cm CompactMetadata
+		if json.Unmarshal(v, &cm) == nil {
+			e.CompactMeta = &cm
+		}
 	}
 	if v, ok := e.raw["message"]; ok {
 		var msg EntryMessage
@@ -139,6 +164,11 @@ func (e *JSONLEntry) GetParentUUID() string {
 // IsMessage returns true if the entry is a user or assistant message.
 func (e *JSONLEntry) IsMessage() bool {
 	return e.Type == "user" || e.Type == "assistant"
+}
+
+// IsCompactBoundary returns true if the entry is a compaction boundary marker.
+func (e *JSONLEntry) IsCompactBoundary() bool {
+	return e.Type == "system" && e.Subtype == "compact_boundary"
 }
 
 // NewEntry creates a new JSONL entry with all required fields.
