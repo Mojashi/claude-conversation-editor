@@ -48,16 +48,13 @@ func AllRules() []CompactRule {
 	}
 }
 
-// RunCompaction linearizes the conversation (main Pa_ chain only) and
-// applies all given rules. The original conversation's Entries are replaced
-// with the compacted result.
+// RunCompaction applies all given rules to a Conversation.
+// The conversation should already contain only the main chain
+// (LoadConversation extracts it at load time).
 func RunCompaction(conv *Conversation, rules []CompactRule) CompactReport {
 	report := CompactReport{
 		TotalBefore: conv.Size(),
 	}
-
-	// Extract only the main chain (what Claude Code's Pa_ sees)
-	conv.Linearize()
 
 	for _, rule := range rules {
 		result, ruleReport := rule.Apply(conv.Entries)
@@ -146,11 +143,13 @@ func (r *StripProgressRule) Apply(entries []*JSONLEntry) ([]*JSONLEntry, Compact
 		"last-prompt":     true,
 	}
 
-	before := len(entries)
-	result := removeAndReparent(entries, func(e *JSONLEntry) bool {
-		return stripTypes[e.Type]
-	})
-	removed := before - len(result)
+	var result []*JSONLEntry
+	for _, e := range entries {
+		if !stripTypes[e.Type] {
+			result = append(result, e)
+		}
+	}
+	removed := len(entries) - len(result)
 
 	report.EntriesRemoved = removed
 	report.BytesAfter = entriesSize(result)

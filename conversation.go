@@ -21,20 +21,70 @@ type Conversation struct {
 	SessionID string
 }
 
-// LoadConversation reads a JSONL file into a Conversation.
+// LoadConversation reads a JSONL file and extracts the main Pa_ chain.
+// Off-chain entries (progress, sidechains, forks) are discarded at load time.
 func LoadConversation(path string) (*Conversation, error) {
-	entries, err := ReadJSONLFile(path)
+	allEntries, err := ReadJSONLFile(path)
 	if err != nil {
 		return nil, err
 	}
 	var sessionID string
-	for _, e := range entries {
+	for _, e := range allEntries {
 		if e.SessionID != "" {
 			sessionID = e.SessionID
 			break
 		}
 	}
-	return &Conversation{Entries: entries, SessionID: sessionID}, nil
+	chain := extractMainChain(allEntries)
+	return &Conversation{Entries: chain, SessionID: sessionID}, nil
+}
+
+// extractMainChain walks the parentUuid tree from the leaf back to root,
+// returning only the entries on that path in file order.
+func extractMainChain(entries []*JSONLEntry) []*JSONLEntry {
+	byUUID := make(map[string]*JSONLEntry)
+	for _, e := range entries {
+		if e.UUID != "" {
+			byUUID[e.UUID] = e
+		}
+	}
+
+	// Find leaf (last entry with UUID)
+	var leaf *JSONLEntry
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].UUID != "" {
+			leaf = entries[i]
+			break
+		}
+	}
+	if leaf == nil {
+		return nil
+	}
+
+	// Walk backward from leaf
+	onChain := make(map[string]bool)
+	visited := make(map[string]bool)
+	cur := leaf
+	for cur != nil {
+		if visited[cur.UUID] {
+			break
+		}
+		visited[cur.UUID] = true
+		onChain[cur.UUID] = true
+		if cur.ParentUUID == nil {
+			break
+		}
+		cur = byUUID[*cur.ParentUUID]
+	}
+
+	// Return in file order
+	var chain []*JSONLEntry
+	for _, e := range entries {
+		if e.UUID != "" && onChain[e.UUID] {
+			chain = append(chain, e)
+		}
+	}
+	return chain
 }
 
 // Messages returns only user/assistant entries.
@@ -289,97 +339,29 @@ func (c *Conversation) ValidateChain() []ChainIssue {
 
 // --- Chain operations ---
 
-// MainChain walks the parentUuid tree from the leaf (last entry with UUID)
-// back to the root, returning the entries on the main path in file order.
-// This is the same path that Claude Code's Pa_() walks.
-// Entries without UUIDs (file-history-snapshot, queue-operation) are excluded.
-func (c *Conversation) MainChain() []*JSONLEntry {
-	byUUID := make(map[string]*JSONLEntry)
-	for _, e := range c.Entries {
-		if e.UUID != "" {
-			byUUID[e.UUID] = e
-		}
-	}
-
-	// Find leaf (last entry with UUID)
-	var leaf *JSONLEntry
-	for i := len(c.Entries) - 1; i >= 0; i-- {
-		if c.Entries[i].UUID != "" {
-			leaf = c.Entries[i]
-			break
-		}
-	}
-	if leaf == nil {
-		return nil
-	}
-
-	// Walk backward from leaf
-	onChain := make(map[string]bool)
-	visited := make(map[string]bool)
-	cur := leaf
-	for cur != nil {
-		if visited[cur.UUID] {
-			break // cycle
-		}
-		visited[cur.UUID] = true
-		onChain[cur.UUID] = true
-		if cur.ParentUUID == nil {
-			break
-		}
-		cur = byUUID[*cur.ParentUUID]
-	}
-
-	// Return in file order
-	var chain []*JSONLEntry
-	for _, e := range c.Entries {
-		if e.UUID != "" && onChain[e.UUID] {
-			chain = append(chain, e)
-		}
-	}
-	return chain
-}
-
-// Linearize replaces c.Entries with only the main chain entries,
-// rebuilding parentUuid as a simple linear sequence.
-// All entry types on the chain are kept (user, assistant, system, etc.)
-// to preserve the structure Claude Code expects.
-func (c *Conversation) Linearize() {
-	chain := c.MainChain()
-
-	// Rebuild parentUuid as linear chain
-	for i, e := range chain {
-		if i == 0 {
-			e.ParentUUID = nil
-		} else {
-			e.SetParentUUID(chain[i-1].UUID)
-		}
-	}
-
-	c.Entries = chain
-}
-
-// assignParents sets parentUuid on entries that don't have one yet
-// (newly created entries). Uses the nearest preceding entry with a UUID.
-func (c *Conversation) assignParents() {
-	first := true
+// rebuildLinearChain sets parentUuid on all entries as a linear chain
+// based on list order. Since LoadConversation already extracted only
+// the main chain, this is the correct parentUuid sequence.
+func (c *Conversation) rebuildLinearChain() {
 	var prevUUID string
 	for _, e := range c.Entries {
 		if e.UUID == "" {
 			continue
 		}
-		if e.ParentUUID == nil && !first && prevUUID != "" {
+		if prevUUID == "" {
+			e.ParentUUID = nil
+		} else {
 			e.SetParentUUID(prevUUID)
 		}
-		first = false
 		prevUUID = e.UUID
 	}
 }
 
 // --- I/O ---
 
-// WriteToFile assigns parents for new entries and writes to the given path.
+// WriteToFile rebuilds the linear parentUuid chain and writes to the given path.
 func (c *Conversation) WriteToFile(path string) error {
-	c.assignParents()
+	c.rebuildLinearChain()
 	return WriteJSONLFile(path, c.Entries)
 }
 

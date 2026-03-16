@@ -48,6 +48,7 @@ type EntryMessage struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"`
 	Model   string          `json:"model,omitempty"`
+	ID      string          `json:"id,omitempty"`
 }
 
 // ParseEntry parses a single JSONL line into a JSONLEntry.
