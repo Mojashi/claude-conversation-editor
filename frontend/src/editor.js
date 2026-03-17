@@ -1139,6 +1139,26 @@ function reloadConversation() { loadConversation(currentSession); }
 function setCurrentProject(v) { currentProject = v; }
 function setCurrentSession(v) { currentSession = v; }
 
+async function checkUpdate() {
+  try {
+    const info = await go.CheckUpdate();
+    document.getElementById('version-badge').textContent = `v${info.current_version}`;
+    if (info.has_update && info.download_url) {
+      const badge = document.getElementById('update-badge');
+      badge.innerHTML = `<span class="update-badge" onclick="doUpdate('${info.download_url}')">↑ v${info.latest_version} available</span>`;
+    }
+  } catch(e) {}
+}
+
+async function doUpdate(url) {
+  setStatus('Downloading update...');
+  try {
+    await go.DoUpdate(url);
+  } catch(e) {
+    setStatus('Update failed: ' + e);
+  }
+}
+
 // Expose functions to window for HTML onclick handlers
 Object.assign(window, {
   loadProjects, loadSessions, setCurrentProject, setCurrentSession,

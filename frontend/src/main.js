@@ -20,7 +20,12 @@ waitForWails(async () => {
   }
 
   // Main editor mode
-  await import('./editor.js');
+  try {
+    await import('./editor.js');
+  } catch(e) {
+    document.body.innerHTML = '<pre style="color:red;padding:20px">editor.js load error:\n' + e.stack + '</pre>';
+    return;
+  }
 
   const go = window.go.main.App;
 
