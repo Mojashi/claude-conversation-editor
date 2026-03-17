@@ -44,6 +44,7 @@ func AllRules() []CompactRule {
 		&StripProgressRule{},
 		&StripToolUseResultRule{},
 		&TruncateOldReadsRule{},
+		&TruncateOldWritesRule{},
 		&FixNullContentRule{},
 	}
 }
@@ -744,6 +745,131 @@ func mergeMessageContent(dst, src *JSONLEntry) {
 		combined = []json.RawMessage{}
 	}
 	dst.Message.Content, _ = json.Marshal(combined)
+}
+
+// --- Rule: TruncateOldWritesRule ---
+// For each file, keeps only the LAST Write/Edit's full input.
+// Earlier Write/Edit tool_use inputs are replaced with a short placeholder.
+// The tool_use block is kept (to maintain tool_use/tool_result pairing)
+// but its input is replaced with a summary.
+
+type TruncateOldWritesRule struct{}
+
+func (r *TruncateOldWritesRule) Name() string { return "truncate-old-writes" }
+func (r *TruncateOldWritesRule) Description() string {
+	return "Truncate non-last Write/Edit inputs per file"
+}
+
+func (r *TruncateOldWritesRule) Apply(entries []*JSONLEntry) ([]*JSONLEntry, CompactRuleReport) {
+	report := CompactRuleReport{BytesBefore: entriesSize(entries)}
+	truncated := 0
+
+	// Pass 1: collect all Write/Edit tool_use → file_path
+	type writeInfo struct {
+		filePath  string
+		toolName  string
+		entryIdx  int
+		blockIdx  int
+	}
+	var allWrites []writeInfo
+	writeToolUses := map[string]string{} // tool_use_id → file_path
+
+	for ei, e := range entries {
+		if e.Message == nil || e.Type != "assistant" {
+			continue
+		}
+		var blocks []json.RawMessage
+		if json.Unmarshal(e.Message.Content, &blocks) != nil {
+			continue
+		}
+		for bi, block := range blocks {
+			var b map[string]json.RawMessage
+			if json.Unmarshal(block, &b) != nil {
+				continue
+			}
+			var typ, id, name string
+			json.Unmarshal(b["type"], &typ)
+			if typ != "tool_use" {
+				continue
+			}
+			json.Unmarshal(b["id"], &id)
+			json.Unmarshal(b["name"], &name)
+			if name != "Write" && name != "Edit" {
+				continue
+			}
+			var input struct {
+				FilePath string `json:"file_path"`
+			}
+			json.Unmarshal(b["input"], &input)
+			if input.FilePath == "" {
+				continue
+			}
+			writeToolUses[id] = input.FilePath
+			allWrites = append(allWrites, writeInfo{
+				filePath: input.FilePath,
+				toolName: name,
+				entryIdx: ei,
+				blockIdx: bi,
+			})
+		}
+	}
+
+	// Pass 2: find last Write/Edit per file
+	lastPerFile := map[string]int{} // file_path → index in allWrites
+	for i, w := range allWrites {
+		lastPerFile[w.filePath] = i
+	}
+
+	// Pass 3: truncate non-last Write/Edit inputs
+	for i, w := range allWrites {
+		if lastPerFile[w.filePath] == i {
+			continue // keep the last one
+		}
+
+		e := entries[w.entryIdx]
+		var blocks []json.RawMessage
+		if json.Unmarshal(e.Message.Content, &blocks) != nil {
+			continue
+		}
+
+		var b map[string]json.RawMessage
+		if json.Unmarshal(blocks[w.blockIdx], &b) != nil {
+			continue
+		}
+
+		// Build placeholder input
+		shortName := w.filePath
+		if idx := strings.LastIndex(w.filePath, "/"); idx >= 0 {
+			shortName = w.filePath[idx+1:]
+		}
+		origSize := len(b["input"])
+
+		var placeholder map[string]string
+		if w.toolName == "Write" {
+			placeholder = map[string]string{
+				"file_path": w.filePath,
+				"content":   fmt.Sprintf("[wrote %s — %s, see later version]", shortName, humanBytes(int64(origSize))),
+			}
+		} else {
+			placeholder = map[string]string{
+				"file_path":  w.filePath,
+				"old_string": fmt.Sprintf("[edited %s, see later version]", shortName),
+				"new_string": "",
+			}
+		}
+
+		b["input"], _ = json.Marshal(placeholder)
+		blocks[w.blockIdx], _ = json.Marshal(b)
+		e.Message.Content, _ = json.Marshal(blocks)
+		truncated++
+	}
+
+	report.BytesAfter = entriesSize(entries)
+	report.BytesSaved = report.BytesBefore - report.BytesAfter
+	if truncated > 0 {
+		report.Details = append(report.Details, fmt.Sprintf("truncated %d old Write/Edit inputs", truncated))
+	}
+	return entries, report
 }
 
 // --- Rule: FixNullContentRule ---

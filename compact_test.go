@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -436,6 +437,97 @@ func TestTruncateOldReadsKeepsSingleRead(t *testing.T) {
 
 	if report.BytesSaved != 0 {
 		t.Errorf("single Read should not be truncated, but saved %d bytes", report.BytesSaved)
+	}
+}
+
+// TestTruncateOldWrites verifies that non-last Write/Edit inputs are truncated.
+func TestTruncateOldWrites(t *testing.T) {
+	bigContent := strings.Repeat("x", 5000)
+	entries := []*JSONLEntry{
+		makeEntry("a", "", "user", "hello"),
+		// Write file.ts (first)
+		makeEntryWithMessage("b", "a", "assistant", &EntryMessage{
+			Role: "assistant",
+			Content: mustMarshal([]map[string]interface{}{
+				{"type": "tool_use", "id": "tu1", "name": "Write", "input": map[string]string{
+					"file_path": "/tmp/file.ts",
+					"content":   bigContent,
+				}},
+			}),
+			ID: "msg1",
+		}),
+		makeEntryWithMessage("c", "b", "user", &EntryMessage{
+			Role:    "user",
+			Content: mustMarshal([]map[string]interface{}{{"type": "tool_result", "tool_use_id": "tu1", "content": "File created successfully"}}),
+		}),
+		// Edit file.ts (last)
+		makeEntryWithMessage("d", "c", "assistant", &EntryMessage{
+			Role: "assistant",
+			Content: mustMarshal([]map[string]interface{}{
+				{"type": "tool_use", "id": "tu2", "name": "Edit", "input": map[string]string{
+					"file_path":  "/tmp/file.ts",
+					"old_string": "xxx",
+					"new_string": "yyy",
+				}},
+			}),
+			ID: "msg2",
+		}),
+		makeEntryWithMessage("e", "d", "user", &EntryMessage{
+			Role:    "user",
+			Content: mustMarshal([]map[string]interface{}{{"type": "tool_result", "tool_use_id": "tu2", "content": "File updated"}}),
+		}),
+	}
+
+	rule := &TruncateOldWritesRule{}
+	result, report := rule.Apply(entries)
+
+	if report.BytesSaved <= 0 {
+		t.Error("expected bytes saved > 0")
+	}
+
+	// Verify first Write was truncated (input.content replaced)
+	for _, e := range result {
+		if e.UUID != "b" {
+			continue
+		}
+		var blocks []json.RawMessage
+		json.Unmarshal(e.Message.Content, &blocks)
+		for _, block := range blocks {
+			var b map[string]json.RawMessage
+			json.Unmarshal(block, &b)
+			var typ string
+			json.Unmarshal(b["type"], &typ)
+			if typ == "tool_use" {
+				inputStr := string(b["input"])
+				if strings.Contains(inputStr, bigContent) {
+					t.Error("first Write content should have been truncated")
+				}
+				if !strings.Contains(inputStr, "see later version") {
+					t.Error("truncated Write should contain placeholder")
+				}
+			}
+		}
+	}
+
+	// Verify last Edit was NOT truncated
+	for _, e := range result {
+		if e.UUID != "d" {
+			continue
+		}
+		var blocks []json.RawMessage
+		json.Unmarshal(e.Message.Content, &blocks)
+		for _, block := range blocks {
+			var b map[string]json.RawMessage
+			json.Unmarshal(block, &b)
+			var typ string
+			json.Unmarshal(b["type"], &typ)
+			if typ == "tool_use" {
+				inputStr := string(b["input"])
+				if !strings.Contains(inputStr, "yyy") {
+					t.Error("last Edit should not be truncated")
+				}
+			}
+		}
 	}
 }
 
