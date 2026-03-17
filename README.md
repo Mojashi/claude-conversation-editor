@@ -47,7 +47,36 @@ surgery
 
 カレントディレクトリのプロジェクトを開く。セッションは一覧から選択。
 
-### 操作
+### Compact（会話の画像化）
+
+会話履歴をチャット風の画像に変換してトークンを削減する実験的機能。テキストとして送るより画像として送った方がトークン効率が良いという知見（"Text or Pixels"）に基づく。
+
+```bash
+# Claude Code 内で
+!surgery compact
+
+# ターミナルから
+surgery compact              # GUI で プレビュー → Apply
+surgery compact --dry-run    # レポートのみ（CLI）
+surgery compact <session-id> --dry-run  # 特定セッション
+```
+
+実行するとコンパクト専用ウィンドウが開き、処理中は「Rendering conversation as images...」と表示される。完了後:
+
+- レンダリング結果の HTML プレビュー（iframe）
+- compact レポート（エントリ数・バイト数の変化）
+- `/resume` コマンド（コピーボタン付き）
+
+**依存**: `weasyprint`（HTML→PDF）と `magick`（PDF→PNG）が PATH に必要。
+
+```bash
+pip install weasyprint
+brew install imagemagick
+```
+
+**実測結果**: 122,721 tokens → 65,237 tokens（**46.8% 削減**）。バイトサイズは増加するがトークン数が大幅に減少。
+
+### エディタ操作
 
 | 操作 | 説明 |
 |------|------|
