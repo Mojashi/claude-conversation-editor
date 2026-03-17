@@ -414,12 +414,12 @@ func TestTruncateOldReadsKeepsSingleRead(t *testing.T) {
 	}
 }
 
-// TestTruncateOldWrites verifies that non-last Write/Edit inputs are truncated.
+// TestTruncateOldWrites verifies that non-last Write inputs are truncated.
 func TestTruncateOldWrites(t *testing.T) {
 	bigContent := strings.Repeat("x", 5000)
 	entries := []*JSONLEntry{
 		makeEntry("a", "", "user", "hello"),
-		// Write file.ts (first)
+		// Write file.ts (first — will be superseded)
 		makeEntryWithMessage("b", "a", "assistant", &EntryMessage{
 			Role: "assistant",
 			Content: mustMarshal([]map[string]interface{}{
@@ -432,16 +432,15 @@ func TestTruncateOldWrites(t *testing.T) {
 		}),
 		makeEntryWithMessage("c", "b", "user", &EntryMessage{
 			Role:    "user",
-			Content: mustMarshal([]map[string]interface{}{{"type": "tool_result", "tool_use_id": "tu1", "content": "File created successfully"}}),
+			Content: mustMarshal([]map[string]interface{}{{"type": "tool_result", "tool_use_id": "tu1", "content": "File created"}}),
 		}),
-		// Edit file.ts (last)
+		// Write file.ts again (last — keeps full content)
 		makeEntryWithMessage("d", "c", "assistant", &EntryMessage{
 			Role: "assistant",
 			Content: mustMarshal([]map[string]interface{}{
-				{"type": "tool_use", "id": "tu2", "name": "Edit", "input": map[string]string{
-					"file_path":  "/tmp/file.ts",
-					"old_string": "xxx",
-					"new_string": "yyy",
+				{"type": "tool_use", "id": "tu2", "name": "Write", "input": map[string]string{
+					"file_path": "/tmp/file.ts",
+					"content":   "final version",
 				}},
 			}),
 			ID: "msg2",
@@ -459,7 +458,7 @@ func TestTruncateOldWrites(t *testing.T) {
 		t.Error("expected bytes saved > 0")
 	}
 
-	// Verify first Write was truncated (input.content replaced)
+	// Verify first Write was truncated
 	for _, e := range result {
 		if e.UUID != "b" {
 			continue
@@ -469,21 +468,17 @@ func TestTruncateOldWrites(t *testing.T) {
 		for _, block := range blocks {
 			var b map[string]json.RawMessage
 			json.Unmarshal(block, &b)
-			var typ string
-			json.Unmarshal(b["type"], &typ)
-			if typ == "tool_use" {
-				inputStr := string(b["input"])
-				if strings.Contains(inputStr, bigContent) {
-					t.Error("first Write content should have been truncated")
-				}
-				if !strings.Contains(inputStr, "see later version") {
-					t.Error("truncated Write should contain placeholder")
-				}
+			inputStr := string(b["input"])
+			if strings.Contains(inputStr, bigContent) {
+				t.Error("first Write should have been truncated")
+			}
+			if !strings.Contains(inputStr, "see later Write") {
+				t.Error("should contain placeholder")
 			}
 		}
 	}
 
-	// Verify last Edit was NOT truncated
+	// Verify last Write kept
 	for _, e := range result {
 		if e.UUID != "d" {
 			continue
@@ -493,15 +488,51 @@ func TestTruncateOldWrites(t *testing.T) {
 		for _, block := range blocks {
 			var b map[string]json.RawMessage
 			json.Unmarshal(block, &b)
-			var typ string
-			json.Unmarshal(b["type"], &typ)
-			if typ == "tool_use" {
-				inputStr := string(b["input"])
-				if !strings.Contains(inputStr, "yyy") {
-					t.Error("last Edit should not be truncated")
-				}
+			inputStr := string(b["input"])
+			if !strings.Contains(inputStr, "final version") {
+				t.Error("last Write should not be truncated")
 			}
 		}
+	}
+}
+
+// TestTruncateOldWritesKeepsEdit verifies Edit inputs are never truncated.
+func TestTruncateOldWritesKeepsEdit(t *testing.T) {
+	entries := []*JSONLEntry{
+		makeEntry("a", "", "user", "hello"),
+		makeEntryWithMessage("b", "a", "assistant", &EntryMessage{
+			Role: "assistant",
+			Content: mustMarshal([]map[string]interface{}{
+				{"type": "tool_use", "id": "tu1", "name": "Edit", "input": map[string]string{
+					"file_path": "/tmp/file.ts", "old_string": "aaa", "new_string": "bbb",
+				}},
+			}),
+			ID: "msg1",
+		}),
+		makeEntryWithMessage("c", "b", "user", &EntryMessage{
+			Role:    "user",
+			Content: mustMarshal([]map[string]interface{}{{"type": "tool_result", "tool_use_id": "tu1", "content": "success"}}),
+		}),
+		makeEntryWithMessage("d", "c", "assistant", &EntryMessage{
+			Role: "assistant",
+			Content: mustMarshal([]map[string]interface{}{
+				{"type": "tool_use", "id": "tu2", "name": "Edit", "input": map[string]string{
+					"file_path": "/tmp/file.ts", "old_string": "bbb", "new_string": "ccc",
+				}},
+			}),
+			ID: "msg2",
+		}),
+		makeEntryWithMessage("e", "d", "user", &EntryMessage{
+			Role:    "user",
+			Content: mustMarshal([]map[string]interface{}{{"type": "tool_result", "tool_use_id": "tu2", "content": "success"}}),
+		}),
+	}
+
+	rule := &TruncateOldWritesRule{}
+	_, report := rule.Apply(entries)
+
+	if report.BytesSaved != 0 {
+		t.Errorf("Edit inputs should not be truncated, but saved %d bytes", report.BytesSaved)
 	}
 }
 

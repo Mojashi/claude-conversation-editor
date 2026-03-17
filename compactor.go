@@ -44,7 +44,6 @@ func AllRules() []CompactRule {
 		&TruncateOldReadsRule{},
 		&TruncateOldWritesRule{},
 		&ShortenSuccessResultsRule{},
-		&ShortenPathsRule{},
 		&FixNullContentRule{},
 	}
 }
@@ -883,31 +882,30 @@ func mergeMessageContent(dst, src *JSONLEntry) {
 }
 
 // --- Rule: TruncateOldWritesRule ---
-// For each file, keeps only the LAST Write/Edit's full input.
-// Earlier Write/Edit tool_use inputs are replaced with a short placeholder.
-// The tool_use block is kept (to maintain tool_use/tool_result pairing)
-// but its input is replaced with a summary.
+// For each file with multiple Writes, keeps only the LAST Write's content.
+// Earlier Writes are replaced with a placeholder (since Write is a full
+// file overwrite, earlier versions are completely superseded).
+// Edit tool_use inputs are NEVER truncated (they contain diffs that
+// provide context about what changed).
 
 type TruncateOldWritesRule struct{}
 
 func (r *TruncateOldWritesRule) Name() string { return "truncate-old-writes" }
 func (r *TruncateOldWritesRule) Description() string {
-	return "Truncate non-last Write/Edit inputs per file"
+	return "Truncate non-last Write inputs per file (Write only, not Edit)"
 }
 
 func (r *TruncateOldWritesRule) Apply(entries []*JSONLEntry) ([]*JSONLEntry, CompactRuleReport) {
 	report := CompactRuleReport{BytesBefore: entriesSize(entries)}
 	truncated := 0
 
-	// Pass 1: collect all Write/Edit tool_use → file_path
+	// Pass 1: collect Write tool_use → file_path (ignore Edit)
 	type writeInfo struct {
-		filePath  string
-		toolName  string
-		entryIdx  int
-		blockIdx  int
+		filePath string
+		entryIdx int
+		blockIdx int
 	}
 	var allWrites []writeInfo
-	writeToolUses := map[string]string{} // tool_use_id → file_path
 
 	for ei, e := range entries {
 		if e.Message == nil || e.Type != "assistant" {
@@ -922,14 +920,13 @@ func (r *TruncateOldWritesRule) Apply(entries []*JSONLEntry) ([]*JSONLEntry, Com
 			if json.Unmarshal(block, &b) != nil {
 				continue
 			}
-			var typ, id, name string
+			var typ, name string
 			json.Unmarshal(b["type"], &typ)
 			if typ != "tool_use" {
 				continue
 			}
-			json.Unmarshal(b["id"], &id)
 			json.Unmarshal(b["name"], &name)
-			if name != "Write" && name != "Edit" {
+			if name != "Write" {
 				continue
 			}
 			var input struct {
@@ -939,17 +936,15 @@ func (r *TruncateOldWritesRule) Apply(entries []*JSONLEntry) ([]*JSONLEntry, Com
 			if input.FilePath == "" {
 				continue
 			}
-			writeToolUses[id] = input.FilePath
 			allWrites = append(allWrites, writeInfo{
 				filePath: input.FilePath,
-				toolName: name,
 				entryIdx: ei,
 				blockIdx: bi,
 			})
 		}
 	}
 
-	// Pass 2: find last Write/Edit per file
+	// Pass 2: find last Write per file
 	lastPerFile := map[string]int{} // file_path → index in allWrites
 	for i, w := range allWrites {
 		lastPerFile[w.filePath] = i
@@ -979,18 +974,9 @@ func (r *TruncateOldWritesRule) Apply(entries []*JSONLEntry) ([]*JSONLEntry, Com
 		}
 		origSize := len(b["input"])
 
-		var placeholder map[string]string
-		if w.toolName == "Write" {
-			placeholder = map[string]string{
-				"file_path": w.filePath,
-				"content":   fmt.Sprintf("[wrote %s — %s, see later version]", shortName, humanBytes(int64(origSize))),
-			}
-		} else {
-			placeholder = map[string]string{
-				"file_path":  w.filePath,
-				"old_string": fmt.Sprintf("[edited %s, see later version]", shortName),
-				"new_string": "",
-			}
+		placeholder := map[string]string{
+			"file_path": w.filePath,
+			"content":   fmt.Sprintf("[wrote %s — %s, see later Write]", shortName, humanBytes(int64(origSize))),
 		}
 
 		b["input"], _ = json.Marshal(placeholder)
