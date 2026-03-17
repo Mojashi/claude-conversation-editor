@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>API Request Viewer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; background: #0d1117; color: #e6edf3; display: flex; flex-direction: column; height: 100vh; }
+header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 16px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+header h1 { font-size: 14px; color: #58a6ff; }
+header .stats { font-size: 12px; color: #8b949e; }
+.drop-zone { padding: 8px 16px; font-size: 12px; color: #8b949e; border: 1px dashed #30363d; border-radius: 6px; cursor: pointer; }
+.drop-zone.active { border-color: #58a6ff; color: #58a6ff; }
+
+.layout { display: flex; flex: 1; overflow: hidden; }
+.msg-list { width: 350px; border-right: 1px solid #30363d; overflow-y: auto; flex-shrink: 0; }
+.msg-item { padding: 8px 12px; border-bottom: 1px solid #21262d; cursor: pointer; font-size: 12px; }
+.msg-item:hover { background: #1c2128; }
+.msg-item.active { background: #1f3a5f; border-left: 3px solid #58a6ff; }
+.msg-item .role { font-weight: 600; text-transform: uppercase; font-size: 10px; }
+.msg-item .role.user { color: #3fb950; }
+.msg-item .role.assistant { color: #d29922; }
+.msg-item .blocks { color: #8b949e; margin-top: 2px; }
+.msg-item .size { color: #484f58; float: right; }
+
+.detail { flex: 1; overflow-y: auto; padding: 16px; }
+.block { margin-bottom: 12px; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+.block-header { padding: 8px 12px; background: #161b22; font-size: 11px; font-weight: 600; display: flex; justify-content: space-between; }
+.block-header .type { text-transform: uppercase; }
+.block-header .type.text { color: #e6edf3; }
+.block-header .type.tool_use { color: #d29922; }
+.block-header .type.tool_result { color: #3fb950; }
+.block-header .type.thinking { color: #8b949e; }
+.block-header .meta { color: #484f58; }
+.block-body { padding: 12px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; max-height: 400px; overflow-y: auto; }
+.block-body.collapsed { max-height: 100px; }
+.block-body.tool-input { background: #1c1c1c; }
+.toggle { cursor: pointer; color: #58a6ff; font-size: 11px; }
+
+.bar-chart { display: flex; gap: 2px; align-items: end; height: 60px; padding: 8px 12px; }
+.bar { background: #58a6ff; min-width: 3px; border-radius: 2px 2px 0 0; position: relative; }
+.bar.user { background: #3fb950; }
+.bar.assistant { background: #d29922; }
+.bar:hover::after { content: attr(data-tip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: #161b22; color: #e6edf3; padding: 4px 8px; border-radius: 4px; font-size: 10px; white-space: nowrap; border: 1px solid #30363d; z-index: 10; }
+
+.summary { padding: 12px 16px; background: #161b22; border-bottom: 1px solid #30363d; font-size: 12px; }
+.summary table { border-collapse: collapse; width: 100%; }
+.summary td { padding: 3px 8px; }
+.summary td:nth-child(2), .summary td:nth-child(3) { text-align: right; font-variant-numeric: tabular-nums; }
+.summary tr.total { font-weight: 600; border-top: 1px solid #30363d; }
+</style>
+</head>
+<body>
+<header>
+  <h1>API Request Viewer</h1>
+  <div class="stats" id="stats"></div>
+  <div class="drop-zone" id="drop">Drop JSON or click to load</div>
+  <input type="file" id="file" accept=".json" style="display:none">
+</header>
+<div class="summary" id="summary"></div>
+<div class="bar-chart" id="chart"></div>
+<div class="layout">
+  <div class="msg-list" id="msgList"></div>
+  <div class="detail" id="detail"><p style="color:#484f58;padding:40px">Select a message</p></div>
+</div>
+
+<script>
+let messages = [];
+
+const drop = document.getElementById('drop');
+const fileInput = document.getElementById('file');
+drop.onclick = () => fileInput.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('active'); };
+drop.ondragleave = () => drop.classList.remove('active');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('active'); loadFile(e.dataTransfer.files[0]); };
+fileInput.onchange = e => loadFile(e.target.files[0]);
+
+// Auto-load from URL param
+const params = new URLSearchParams(location.search);
+if (params.get('file')) {
+  fetch(params.get('file')).then(r => r.json()).then(data => render(data.messages || data));
+}
+
+function loadFile(f) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    const data = JSON.parse(e.target.result);
+    render(data.messages || data);
+  };
+  reader.readAsText(f);
+}
+
+function blockSize(b) {
+  if (b.type === 'text') return b.text?.length || 0;
+  if (b.type === 'tool_result') {
+    const c = b.content;
+    return typeof c === 'string' ? c.length : JSON.stringify(c).length;
+  }
+  if (b.type === 'tool_use') return JSON.stringify(b.input || {}).length;
+  if (b.type === 'thinking') return b.thinking?.length || 0;
+  return 0;
+}
+
+function msgSize(m) {
+  const c = m.content;
+  if (typeof c === 'string') return c.length;
+  if (Array.isArray(c)) return c.reduce((s, b) => s + blockSize(b), 0);
+  return 0;
+}
+
+function blockSummary(b) {
+  if (b.type === 'text') return `text(${(b.text?.length||0).toLocaleString()})`;
+  if (b.type === 'tool_use') return `${b.name}(${JSON.stringify(b.input||{}).length.toLocaleString()})`;
+  if (b.type === 'tool_result') {
+    const c = b.content;
+    const s = typeof c === 'string' ? c.length : JSON.stringify(c).length;
+    return `result(${s.toLocaleString()})`;
+  }
+  if (b.type === 'thinking') return `think(${(b.thinking?.length||0).toLocaleString()})`;
+  return b.type;
+}
+
+function render(msgs) {
+  messages = msgs;
+  const total = msgs.reduce((s, m) => s + msgSize(m), 0);
+  document.getElementById('stats').textContent = `${msgs.length} messages, ${(total/1024).toFixed(1)}KB`;
+
+  // Summary table
+  const toolMap = {};
+  const tuNames = {};
+  for (const m of msgs) {
+    if (!Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (b.type === 'tool_use') tuNames[b.id] = b.name;
+    }
+  }
+  const categories = {};
+  for (const m of msgs) {
+    const c = m.content;
+    if (typeof c === 'string') {
+      categories['string'] = (categories['string']||0) + c.length;
+    } else if (Array.isArray(c)) {
+      for (const b of c) {
+        let cat = b.type;
+        if (b.type === 'tool_use') cat = `tool_use:${b.name}`;
+        if (b.type === 'tool_result') cat = `tool_result:${tuNames[b.tool_use_id]||'?'}`;
+        const s = blockSize(b);
+        categories[cat] = (categories[cat]||0) + s;
+      }
+    }
+  }
+  const sorted = Object.entries(categories).sort((a,b) => b[1]-a[1]);
+  let html = '<table>';
+  for (const [cat, size] of sorted) {
+    const pct = (size*100/total).toFixed(1);
+    html += `<tr><td>${cat}</td><td>${(size/1024).toFixed(1)}KB</td><td>${pct}%</td></tr>`;
+  }
+  html += `<tr class="total"><td>Total</td><td>${(total/1024).toFixed(1)}KB</td><td>100%</td></tr>`;
+  html += '</table>';
+  document.getElementById('summary').innerHTML = html;
+
+  // Bar chart
+  const maxSize = Math.max(...msgs.map(msgSize), 1);
+  const chart = document.getElementById('chart');
+  chart.innerHTML = '';
+  msgs.forEach((m, i) => {
+    const s = msgSize(m);
+    const h = Math.max(2, (s / maxSize) * 50);
+    const bar = document.createElement('div');
+    bar.className = `bar ${m.role}`;
+    bar.style.height = h + 'px';
+    bar.style.flex = '1';
+    bar.dataset.tip = `#${i} ${m.role} ${(s/1024).toFixed(1)}KB`;
+    bar.onclick = () => selectMsg(i);
+    chart.appendChild(bar);
+  });
+
+  // Message list
+  const list = document.getElementById('msgList');
+  list.innerHTML = '';
+  msgs.forEach((m, i) => {
+    const div = document.createElement('div');
+    div.className = 'msg-item';
+    div.dataset.idx = i;
+    const s = msgSize(m);
+    const blocks = Array.isArray(m.content) ? m.content.map(blockSummary).join(' ') : 'string';
+    div.innerHTML = `<span class="role ${m.role}">${m.role}</span> <span class="size">${(s/1024).toFixed(1)}KB</span><div class="blocks">${blocks}</div>`;
+    div.onclick = () => selectMsg(i);
+    list.appendChild(div);
+  });
+}
+
+function selectMsg(i) {
+  document.querySelectorAll('.msg-item').forEach(el => el.classList.remove('active'));
+  document.querySelector(`.msg-item[data-idx="${i}"]`)?.classList.add('active');
+
+  const m = messages[i];
+  const detail = document.getElementById('detail');
+
+  if (typeof m.content === 'string') {
+    detail.innerHTML = `<div class="block"><div class="block-header"><span class="type text">string</span><span class="meta">${m.content.length.toLocaleString()} chars</span></div><div class="block-body">${esc(m.content)}</div></div>`;
+    return;
+  }
+
+  let html = '';
+  for (const b of (m.content || [])) {
+    const s = blockSize(b);
+    const id = `block-${i}-${Math.random().toString(36).slice(2,8)}`;
+
+    if (b.type === 'text') {
+      html += `<div class="block"><div class="block-header"><span class="type text">text</span><span class="meta">${s.toLocaleString()} chars</span></div><div class="block-body" id="${id}">${esc(b.text)}</div></div>`;
+    } else if (b.type === 'tool_use') {
+      const input = JSON.stringify(b.input, null, 2);
+      html += `<div class="block"><div class="block-header"><span class="type tool_use">tool_use: ${esc(b.name)}</span><span class="meta">${b.id?.slice(-8)} | ${s.toLocaleString()} chars <span class="toggle" onclick="toggle('${id}')">toggle</span></span></div><div class="block-body tool-input collapsed" id="${id}">${esc(input)}</div></div>`;
+    } else if (b.type === 'tool_result') {
+      const c = b.content;
+      const text = typeof c === 'string' ? c : JSON.stringify(c, null, 2);
+      html += `<div class="block"><div class="block-header"><span class="type tool_result">tool_result</span><span class="meta">${b.tool_use_id?.slice(-8)} | ${s.toLocaleString()} chars ${b.is_error ? '⚠ ERROR' : ''} <span class="toggle" onclick="toggle('${id}')">toggle</span></span></div><div class="block-body collapsed" id="${id}">${esc(text)}</div></div>`;
+    } else if (b.type === 'thinking') {
+      html += `<div class="block"><div class="block-header"><span class="type thinking">thinking</span><span class="meta">${s.toLocaleString()} chars</span></div><div class="block-body collapsed" id="${id}">${esc(b.thinking || '(empty)')}</div></div>`;
+    } else {
+      html += `<div class="block"><div class="block-header"><span class="type">${esc(b.type)}</span></div><div class="block-body collapsed" id="${id}">${esc(JSON.stringify(b, null, 2))}</div></div>`;
+    }
+  }
+  detail.innerHTML = html;
+}
+
+function toggle(id) {
+  document.getElementById(id)?.classList.toggle('collapsed');
+}
+
+function esc(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>
